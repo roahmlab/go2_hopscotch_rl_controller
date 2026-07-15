@@ -222,23 +222,23 @@ class Custom:
         if (self.alignment_percent >= 1) and (self.ii < self.traj_length):
 
             if self.record_odom:
-                self.init_xyz = self.sport_state.position.copy()
-                self.init_xyz[2] = 0
-                self.init_quat_inv = math.quat_inv(self.low_state.imu_state.quaternion.copy())
+                self.init_xyz = jp.array(self.sport_state.position)
+                self.init_xyz = self.init_xyz.at[2].set(0)
+                self.init_quat_inv = math.quat_inv(jp.array(self.low_state.imu_state.quaternion))
                 self.record_odom = False
 
             # current
             dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
             dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
-            dof_pos = dof_pos[self.JOINT_REORDERING]
-            dof_vel = dof_vel[self.JOINT_REORDERING]
+            dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
+            dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
         
-            world_quat = self.low_state.imu_state.quaternion
-            base_pos = math.rotate(self.sport_state.position - self.init_xyz, self.init_quat_inv)
+            world_quat = jp.array(self.low_state.imu_state.quaternion)
+            base_pos = math.rotate(jp.array(self.sport_state.position) - self.init_xyz, self.init_quat_inv)
             base_quat = math.quat_mul(world_quat, self.init_quat_inv)
             world_to_body = math.quat_inv(world_quat)
-            lin_vel_body = self.sport_state.velocity
-            ang_vel_body = self.low_state.imu_state.gyroscope
+            lin_vel_body = jp.array(self.sport_state.velocity)
+            ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
             proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
 
             q_ref = self.q_ref[self.ii]
