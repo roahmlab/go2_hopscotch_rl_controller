@@ -137,7 +137,9 @@ class Custom:
         self.action_scale = rc.get("config")['env']['action_scale']
 
 
-        # TODO: CHECK JOINT REORDERING, CURRENT BLOCK, OBS SCALING
+        # MuJoCo: [FL, FR, RL, RR]
+        # Unitree Go2: [FR, FL, RR, RL]
+        self.JOINT_REORDERING = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 
 
     # Public methods
@@ -210,11 +212,12 @@ class Custom:
             self.alignment_percent = min(self.alignment_percent, 1)
 
             for i in range(12):
-                self.low_cmd.motor_cmd[i].q = float(self.q0[i])
-                self.low_cmd.motor_cmd[i].dq = 0
-                self.low_cmd.motor_cmd[i].kp = self.Kp
-                self.low_cmd.motor_cmd[i].kd = self.Kd
-                self.low_cmd.motor_cmd[i].tau = 0
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp
+                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].tau = 0
 
         if (self.alignment_percent >= 1) and (self.ii < self.traj_length):
 
@@ -227,6 +230,8 @@ class Custom:
             # current
             dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
             dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
+            dof_pos = dof_pos[self.JOINT_REORDERING]
+            dof_vel = dof_vel[self.JOINT_REORDERING]
         
             world_quat = self.low_state.imu_state.quaternion
             base_pos = math.rotate(self.sport_state.position - self.init_xyz, self.init_quat_inv)
@@ -285,11 +290,12 @@ class Custom:
 
             # set joint commands
             for i in range(12):
-                self.low_cmd.motor_cmd[i].q = float(q_des[i])
-                self.low_cmd.motor_cmd[i].dq = 0
-                self.low_cmd.motor_cmd[i].kp = self.Kp
-                self.low_cmd.motor_cmd[i].kd = self.Kd
-                self.low_cmd.motor_cmd[i].tau = float(tau_ff[i])
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(q_des[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp
+                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
 
 
             # update history
@@ -307,11 +313,12 @@ class Custom:
             self.settle_percent = min(self.settle_percent, 1)
 
             for i in range(12):
-                self.low_cmd.motor_cmd[i].q = float(self.qf[i])
-                self.low_cmd.motor_cmd[i].dq = 0
-                self.low_cmd.motor_cmd[i].kp = self.Kp
-                self.low_cmd.motor_cmd[i].kd = self.Kd
-                self.low_cmd.motor_cmd[i].tau = 0
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(self.qf[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp
+                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].tau = 0
 
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
         self.lowcmd_publisher.Write(self.low_cmd)
