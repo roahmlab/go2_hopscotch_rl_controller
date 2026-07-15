@@ -139,7 +139,7 @@ class Custom:
 
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
-        self.JOINT_REORDERING = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        self.JOINT_REORDERING = jp.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
 
     # Public methods
