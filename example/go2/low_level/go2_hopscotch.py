@@ -7,10 +7,8 @@ from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitiali
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.utils.thread import RecurrentThread
 import unitree_legged_const as go2
@@ -25,6 +23,8 @@ from brax.training.acme import running_statistics
 from brax.training.agents.ppo import networks as ppo_networks
 from jax import numpy as jp
 from scipy.spatial.transform import Rotation
+
+import pyvicon_datastream as pv
 
 class Custom:
     def __init__(self):
@@ -44,7 +44,12 @@ class Custom:
 
         self.low_cmd = unitree_go_msg_dds__LowCmd_()  
         self.low_state = None  
-        self.sport_state = None
+
+        # fb info
+        self.fb_pos = None
+        self.fb_prev = None
+        self.fb_quat = None
+        self.mocap_dt = 0.005
 
         self.alignment_duration = 250
         self.alignment_percent = 0
@@ -57,6 +62,7 @@ class Custom:
 
         # thread handling
         self.lowCmdWriteThreadPtr = None
+        self.mocapThreadPtr = None
 
         self.crc = CRC()
 
@@ -136,7 +142,6 @@ class Custom:
         # run config parameters
         self.action_scale = rc.get("config")['env']['action_scale']
 
-
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
         self.JOINT_REORDERING = jp.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
@@ -154,8 +159,12 @@ class Custom:
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
 
-        self.sportmodestate_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-        self.sportmodestate_subscriber.Init(self.SportModeStateMessageHandler, 10)
+        # start vicon
+        self.TARGET = "go2"
+        self.vicon = pv.PyViconDatastream()
+        self.vicon.connect("192.168.0.149")
+        self.vicon.set_stream_mode(pv.StreamMode.ClientPullPreFetch)
+        self.vicon.enable_segment_data()
 
         self.sc = SportClient()  
         self.sc.SetTimeout(5.0)
@@ -173,6 +182,10 @@ class Custom:
             time.sleep(1)
 
     def Start(self):
+        self.mocapThreadPtr = RecurrentThread(
+            interval=self.mocap_dt, target=self.UpdateMocap, name="updatemocap"
+        )
+        self.mocapThreadPtr.Start()
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd"
         )
@@ -198,12 +211,9 @@ class Custom:
         # print("IMU state: ", msg.imu_state)
         # print("Battery state: voltage: ", msg.power_v, "current: ", msg.power_a)
 
-    def SportModeStateMessageHandler(self, msg: SportModeState_):
-        self.sport_state = msg
-
     def LowCmdWrite(self):
 
-        if self.low_state is None or self.sport_state is None:
+        if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
             return
 
         if self.alignment_percent < 1:
@@ -222,9 +232,9 @@ class Custom:
         if (self.alignment_percent >= 1) and (self.ii < self.traj_length):
 
             if self.record_odom:
-                self.init_xyz = jp.array(self.sport_state.position)
+                self.init_xyz = jp.array(self.fb_pos)
                 self.init_xyz = self.init_xyz.at[2].set(0)
-                self.init_quat_inv = math.quat_inv(jp.array(self.low_state.imu_state.quaternion))
+                self.init_quat_inv = math.quat_inv(self.fb_quat)
                 self.record_odom = False
 
             # current
@@ -233,11 +243,12 @@ class Custom:
             dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
             dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
         
-            world_quat = jp.array(self.low_state.imu_state.quaternion)
-            base_pos = math.rotate(jp.array(self.sport_state.position) - self.init_xyz, self.init_quat_inv)
+            world_quat = jp.array(self.fb_quat)
+            base_pos = math.rotate(self.fb_pos - self.init_xyz, self.init_quat_inv)
             base_quat = math.quat_mul(world_quat, self.init_quat_inv)
             world_to_body = math.quat_inv(world_quat)
-            lin_vel_body = jp.array(self.sport_state.velocity)
+            base_vel = (self.fb_pos - self.fb_prev) / self.mocap_dt
+            lin_vel_body = math.rotate(base_vel, world_to_body)
             ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
             proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
 
@@ -323,6 +334,15 @@ class Custom:
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
         self.lowcmd_publisher.Write(self.low_cmd)
 
+    def UpdateMocap(self):
+        if self.vicon.get_frame() == pv.Result.Success:
+            seg = self.vicon.get_subject_root_segment_name(self.TARGET)
+            pos = 0.001 * self.vicon.get_segment_global_translation(self.TARGET, seg)
+            rot = np.roll(self.vicon.get_segment_global_quaternion(self.TARGET, seg), 1)
+
+            self.fb_prev = self.fb_pos
+            self.fb_pos = jp.array(pos)
+            self.fb_quat = jp.array(rot)
 
 
 
