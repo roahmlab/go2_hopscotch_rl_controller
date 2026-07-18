@@ -49,7 +49,7 @@ class Custom:
         self.fb_pos = None
         self.fb_prev = None
         self.fb_quat = None
-        self.mocap_dt = 0.005
+        self.mocap_dt = 0.01
 
         self.alignment_duration = 250
         self.alignment_percent = 0
@@ -162,8 +162,8 @@ class Custom:
         # start vicon
         self.TARGET = "go2"
         self.vicon = pv.PyViconDatastream()
-        self.vicon.connect("192.168.0.149")
         self.vicon.set_stream_mode(pv.StreamMode.ClientPullPreFetch)
+        self.vicon.connect("192.168.0.149")
         self.vicon.enable_segment_data()
 
         self.sc = SportClient()  
