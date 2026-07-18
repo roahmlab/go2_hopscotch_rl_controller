@@ -215,13 +215,13 @@ class Custom:
 
     def LowCmdWrite(self):
 
+        if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
+            return
+        
         if self.firstRun:
             self.startPos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
             self.startPos = self.startPos.at[self.JOINT_REORDERING].get()
             self.firstRun = False
-
-        if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
-            return
 
         if self.alignment_percent < 1:
 
