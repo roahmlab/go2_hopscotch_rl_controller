@@ -332,6 +332,8 @@ class Custom:
                 self.init_quat_inv = math.quat_inv(self.fb_quat)
                 self.record_odom = False
 
+            t_infer_start = time.perf_counter()
+
             # current
             dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
             dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
@@ -357,7 +359,9 @@ class Custom:
             q_rel = math.quat_mul(math.quat_inv(base_quat), base_quat_ref)
             ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
 
-            cur = [proj_gravity, ang_vel_body, lin_vel_body, dof_pos - q_ref[6:18], dof_vel - v_ref[6:18], base_pos - q_ref[0:3], ori_err, onehot, self.last_action]
+            joint_err = dof_pos - q_ref[6:18]
+            base_err = base_pos - q_ref[0:3]
+            cur = [proj_gravity, ang_vel_body, lin_vel_body, joint_err, dof_vel - v_ref[6:18], base_err, ori_err, onehot, self.last_action]
             current = jp.concatenate(cur)
 
 
@@ -384,7 +388,8 @@ class Custom:
             obs = jp.clip(jp.nan_to_num(obs), -100.0, 100.0)
 
             action, _ = self.policy(obs, self.policy_key)
-            action = np.clip(action, -1.0, 1.0)
+            action = np.clip(action, -1.0, 1.0)  # blocks until the device compute is done
+            infer_ms = 1000.0 * (time.perf_counter() - t_infer_start)
 
             q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
 
@@ -409,6 +414,16 @@ class Custom:
             self.history[-1, :] = np.concatenate((dof_pos, dof_vel, base_pos, ang_vel_body, tau_applied))
 
             self.last_action = action.copy()
+
+            # per-step inference timing + tracking error vs reference trajectory
+            base_err_np = np.asarray(base_err)
+            logging.info(
+                "step %3d/%d | infer %6.2f ms | base_err [% .3f % .3f % .3f] m (norm %.3f) | ori_err %.3f | joint_err max %.3f rad",
+                self.ii, self.traj_length, infer_ms,
+                base_err_np[0], base_err_np[1], base_err_np[2],
+                np.linalg.norm(base_err_np),
+                np.linalg.norm(np.asarray(ori_err)),
+                np.max(np.abs(np.asarray(joint_err))))
 
             self.ii += 1
 
