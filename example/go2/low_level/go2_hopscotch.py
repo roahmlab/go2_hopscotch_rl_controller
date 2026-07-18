@@ -164,7 +164,7 @@ class Custom:
         # start vicon
         self.TARGET = "go2"
         self.vicon = pv.PyViconDatastream()
-        self.vicon.set_stream_mode(pv.StreamMode.ClientPullPreFetch)
+        self.vicon.set_stream_mode(pv.StreamMode.ServerPush)
         self.vicon.connect("192.168.0.149")
         self.vicon.enable_segment_data()
 
