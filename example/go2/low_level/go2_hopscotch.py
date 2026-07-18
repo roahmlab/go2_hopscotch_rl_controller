@@ -26,10 +26,21 @@ from scipy.spatial.transform import Rotation
 
 import pyvicon_datastream as pv
 
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
 class Custom:
     def __init__(self):
         self.Kp = 50.0
         self.Kd = 0.5
+
+        # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
+        self.Kp_stand = 60.0
+        self.Kd_stand = 5.0
 
         self.dt = 0.02
         self.stride = 20
@@ -41,6 +52,7 @@ class Custom:
         self.last_action = jp.zeros(12)
 
         self.ii = 0
+        self.motiontime = 0
 
         self.low_cmd = unitree_go_msg_dds__LowCmd_()  
         self.low_state = None  
@@ -52,8 +64,25 @@ class Custom:
         self.mocap_dt = 0.01
 
         self.startPos = [0.0] * 12
-        self.alignment_duration = 50
+
+        # folded pose (feet tucked under hips, unloaded), MuJoCo order [FL, FR, RL, RR];
+        # same pose as _targetPos_1 in go2_stand_example.py (which is in Unitree motor order)
+        self.foldPos = jp.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
+                                 0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
+        self.fold_duration = 50      # lie -> fold, 1.0 s at 50 Hz
+        self.fold_percent = 0
+
+        self.alignment_duration = 50  # fold -> q0, 1.0 s
         self.alignment_percent = 0
+
+        # hold at q0 with integral action: converges to the static holding torque
+        # (gravity + stance geometry) with time constant Kp_stand/Ki ~ 0.6 s
+        self.hold_duration = 150     # 3.0 s
+        self.hold_percent = 0
+        self.Ki = 100.0
+        self.tau_i_max = 15.0
+        self.tau_i = np.zeros(12)    # MuJoCo order
+        self.handoff_fade_ticks = 25  # fade tau_i out over first 0.5 s of policy phase
 
         self.settle_duration = 50
         self.settle_percent = 0
@@ -222,20 +251,57 @@ class Custom:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
 
-        if self.alignment_percent < 1:
+        self.motiontime += 1
 
+        if self.fold_percent < 1:
+            # stage 1: lie -> fold (feet tucked under hips, unloaded)
+            self.fold_percent += 1.0 / self.fold_duration
+            self.fold_percent = min(self.fold_percent, 1)
+
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.fold_percent) * self.startPos[i] + self.fold_percent * self.foldPos[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
+                self.low_cmd.motor_cmd[idx].tau = 0
+
+        elif self.alignment_percent < 1:
+            # stage 2: fold -> q0 (vertical push-up)
             self.alignment_percent += 1.0 / self.alignment_duration
             self.alignment_percent = min(self.alignment_percent, 1)
 
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
-                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.startPos[i] + self.alignment_percent * self.q0[i])
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.foldPos[i] + self.alignment_percent * self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = self.Kp
-                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        elif (self.alignment_percent >= 1) and (self.ii < self.traj_length):
+        elif self.hold_percent < 1:
+            # stage 3: hold q0, integrate out the static holding torque
+            self.hold_percent += 1.0 / self.hold_duration
+            self.hold_percent = min(self.hold_percent, 1)
+
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                err_i = float(self.q0[i]) - self.low_state.motor_state[idx].q
+                self.tau_i[i] = np.clip(self.tau_i[i] + self.Ki * err_i * self.dt,
+                                        -self.tau_i_max, self.tau_i_max)
+                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
+                self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
+
+            if self.motiontime % 10 == 0:  # every 0.2 s
+                q = np.array([self.low_state.motor_state[self.JOINT_REORDERING[i]].q for i in range(12)])
+                err = q - np.asarray(self.q0)
+                logging.info("hold err vs q0: " + np.array2string(err, precision=3, suppress_small=True)
+                             + "  max|err|: %.3f" % np.max(np.abs(err)))
+
+        elif (self.hold_percent >= 1) and (self.ii < self.traj_length):
 
             if self.record_odom:
                 self.init_xyz = jp.array(self.fb_pos)
@@ -305,6 +371,9 @@ class Custom:
 
             tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
 
+            # hand the static load over to the policy: fade the hold torque out
+            fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
+
             # set joint commands
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
@@ -312,7 +381,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].dq = 0
                 self.low_cmd.motor_cmd[idx].kp = self.Kp
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
-                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
+                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i] + fade * self.tau_i[i])
 
 
             # update history
@@ -324,7 +393,7 @@ class Custom:
 
             self.ii += 1
 
-        elif (self.alignment_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
+        elif (self.hold_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
