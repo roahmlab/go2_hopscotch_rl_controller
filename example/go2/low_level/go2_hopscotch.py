@@ -52,10 +52,10 @@ class Custom:
         self.mocap_dt = 0.01
 
         self.startPos = [0.0] * 12
-        self.alignment_duration = 250
+        self.alignment_duration = 50
         self.alignment_percent = 0
 
-        self.settle_duration = 250
+        self.settle_duration = 50
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
@@ -219,8 +219,7 @@ class Custom:
             return
         
         if self.firstRun:
-            self.startPos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
-            self.startPos = self.startPos.at[self.JOINT_REORDERING].get()
+            self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
 
         if self.alignment_percent < 1:
@@ -236,7 +235,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        if (self.alignment_percent >= 1) and (self.ii < self.traj_length):
+        elif (self.alignment_percent >= 1) and (self.ii < self.traj_length):
 
             if self.record_odom:
                 self.init_xyz = jp.array(self.fb_pos)
@@ -325,7 +324,7 @@ class Custom:
 
             self.ii += 1
 
-        if (self.alignment_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
+        elif (self.alignment_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
