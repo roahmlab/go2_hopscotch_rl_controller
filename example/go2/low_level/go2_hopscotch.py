@@ -216,8 +216,8 @@ class Custom:
     def LowCmdWrite(self):
 
         if self.firstRun:
-            start_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
-            start_pos = start_pos.at[self.JOINT_REORDERING].get()
+            self.startPos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
+            self.startPos = self.startPos.at[self.JOINT_REORDERING].get()
             self.firstRun = False
 
         if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
