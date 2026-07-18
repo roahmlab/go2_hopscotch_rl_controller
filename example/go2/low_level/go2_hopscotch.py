@@ -51,6 +51,7 @@ class Custom:
         self.fb_quat = None
         self.mocap_dt = 0.01
 
+        self.startPos = [0.0] * 12
         self.alignment_duration = 250
         self.alignment_percent = 0
 
@@ -132,6 +133,7 @@ class Custom:
         self.traj_length = self.q_ref.shape[0]
 
         # Record initial odometry
+        self.firstRun = True
         self.record_odom = True
         self.init_xyz = None
         self.init_quat_inv = None
@@ -213,6 +215,11 @@ class Custom:
 
     def LowCmdWrite(self):
 
+        if self.firstRun:
+            start_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
+            start_pos = start_pos.at[self.JOINT_REORDERING].get()
+            self.firstRun = False
+
         if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
             return
 
@@ -223,7 +230,7 @@ class Custom:
 
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
-                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.startPos[i] + self.alignment_percent * self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
                 self.low_cmd.motor_cmd[idx].kp = self.Kp
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
