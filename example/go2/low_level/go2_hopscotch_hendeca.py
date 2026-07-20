@@ -464,8 +464,22 @@ class Custom:
 
     # ------------------------------------------------------------- main tick
     def LowCmdWrite(self):
+        """Publishes every tick. Any exception in the tick body converges to the
+        damped stop instead of killing the thread (which would freeze the command
+        stream with the motors holding the last stiff command)."""
+        try:
+            if not self._tick():
+                return                      # not ready yet (no low_state) - don't publish
+        except Exception:
+            logging.exception("control tick crashed -> damping")
+            self.aborted = True
+            self._damped_stop()
+        self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+        self.lowcmd_publisher.Write(self.low_cmd)
+
+    def _tick(self):
         if self.low_state is None:
-            return
+            return False
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[m].q for m in range(12)]
             self.firstRun = False
@@ -527,8 +541,7 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = 0
 
-        self.low_cmd.crc = self.crc.Crc(self.low_cmd)
-        self.lowcmd_publisher.Write(self.low_cmd)
+        return True
 
 
 if __name__ == '__main__':
