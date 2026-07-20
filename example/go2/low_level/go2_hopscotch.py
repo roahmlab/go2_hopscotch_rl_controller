@@ -1,12 +1,7 @@
-import gc
 import time
 import sys
 import os
 import pickle
-
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -371,7 +366,6 @@ if __name__ == '__main__':
 
     custom = Custom()
     custom.Init()
-    gc.disable()
     custom.Start()
 
     while True:
