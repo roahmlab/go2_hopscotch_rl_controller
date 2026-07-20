@@ -85,6 +85,12 @@ class Custom:
         self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
         self.h = np.zeros(self.h_offs[-1])
 
+        # warm up inference
+        o = np.zeros(self.actor[0][0][0].shape[0])
+        for wz, uz, *_ in self.actor[0]:
+            o = 1.0 / (1.0 + np.exp(-(o @ wz + self.h[:uz.shape[0]] @ uz)))
+        o = o @ self.actor[1][0]
+
         # Get q0 and qf
         self.q0 = self.x_ref[0][7:19]
         self.qf = self.x_ref[self.traj_length][7:19]
