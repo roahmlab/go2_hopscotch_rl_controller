@@ -61,6 +61,14 @@ class Custom:
 
         self.crc = CRC()
 
+        # timing stats
+        self.tick_prev = None
+        self.tick_sum = 0.0
+        self.tick_max = 0.0
+        self.inf_sum = 0.0
+        self.inf_max = 0.0
+        self.n_tick = 0
+
         # Load reference trajectory
         f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories.npz"))
         x_ref, u_ref = f["x_refs"], f["u_refs"]
@@ -145,6 +153,18 @@ class Custom:
 
     def LowCmdWrite(self):
 
+        now = time.perf_counter()
+        if self.tick_prev is not None:
+            dtick = now - self.tick_prev
+            self.tick_sum += dtick
+            self.tick_max = max(self.tick_max, dtick)
+            self.n_tick += 1
+            if self.n_tick % 200 == 0:
+                print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
+                      f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
+                self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
+        self.tick_prev = now
+
         if self.low_state is None:
             return
 
@@ -172,6 +192,8 @@ class Custom:
             if self.record_odom:
                 self.q_off = quat_mul(self.x_ref[0][3:7], quat_inv(imu_quat))
                 self.record_odom = False
+
+            inf_t0 = time.perf_counter()
 
             # current
             dof_pos = np.array([self.low_state.motor_state[i].q for i in range(12)])
@@ -221,6 +243,10 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
                 self.low_cmd.motor_cmd[idx].tau = float(tau[i])
 
+            inf = time.perf_counter() - inf_t0
+            self.inf_sum += inf
+            self.inf_max = max(self.inf_max, inf)
+
             self.ii += self.stride
 
         elif (self.alignment_percent >= 1) and (self.ii >= self.traj_length) and (self.settle_percent < 1):
@@ -242,6 +268,18 @@ class Custom:
 
 
 if __name__ == '__main__':
+
+    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+        ChannelFactoryInitialize(0)
+        custom = Custom()
+        custom.InitLowCmd()
+        custom.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+        custom.lowcmd_publisher.Init()
+        custom.low_state = unitree_go_msg_dds__LowState_()
+        custom.alignment_percent = 1
+        custom.Start()
+        time.sleep(8)
+        sys.exit(0)
 
     print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
     input("Press Enter to continue...")
