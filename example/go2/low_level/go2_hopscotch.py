@@ -36,9 +36,13 @@ class Custom:
         self.Kp = 40.0
         self.Kd = 10.0
 
+        # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
+        self.Kp_stand = 60.0
+        self.Kd_stand = 5.0
+
         self.dt = 0.005
         self.stride = 5
-        self.traj_end = 1000
+        self.traj_end = 3400
 
         self.preview_offsets = (25, 50, 100)
         self.obs_idx = np.r_[3:19, 22:37]
@@ -49,8 +53,23 @@ class Custom:
         self.low_state = None
 
         self.startPos = [0.0] * 12
-        self.alignment_duration = 400
+
+        # folded pose (feet tucked under hips, unloaded), MuJoCo order [FL, FR, RL, RR]
+        self.foldPos = np.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
+                                 0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
+        self.fold_duration = 200
+        self.fold_percent = 0
+
+        self.alignment_duration = 200
         self.alignment_percent = 0
+
+        # hold at q0 with integral action: converges to the static holding torque
+        self.hold_duration = 600
+        self.hold_percent = 0
+        self.Ki = 100.0
+        self.tau_i_max = 15.0
+        self.tau_i = np.zeros(12)
+        self.handoff_fade_ticks = 100
 
         self.settle_duration = 400
         self.settle_percent = 0
@@ -170,7 +189,7 @@ class Custom:
             self.tick_sum += dtick
             self.tick_max = max(self.tick_max, dtick)
             self.log_tick.append(dtick)
-            if self.alignment_percent < 1:
+            if self.hold_percent < 1:
                 self.log_align.append(dtick)
             self.n_tick += 1
             if self.n_tick % 200 == 0:
@@ -186,20 +205,56 @@ class Custom:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
 
-        if self.alignment_percent < 1:
+        if self.fold_percent < 1:
+            # stage 1: lie -> fold (feet tucked under hips, unloaded)
+            self.fold_percent += 1.0 / self.fold_duration
+            self.fold_percent = min(self.fold_percent, 1)
 
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.fold_percent) * self.startPos[i] + self.fold_percent * self.foldPos[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
+                self.low_cmd.motor_cmd[idx].tau = 0
+
+        elif self.alignment_percent < 1:
+            # stage 2: fold -> q0 (vertical push-up)
             self.alignment_percent += 1.0 / self.alignment_duration
             self.alignment_percent = min(self.alignment_percent, 1)
 
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
-                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.startPos[i] + self.alignment_percent * self.q0[i])
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.foldPos[i] + self.alignment_percent * self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = self.Kp
-                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        elif (self.alignment_percent >= 1) and (self.ii < self.traj_end):
+        elif self.hold_percent < 1:
+            # stage 3: hold q0, integrate out the static holding torque
+            self.hold_percent += 1.0 / self.hold_duration
+            self.hold_percent = min(self.hold_percent, 1)
+
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                err_i = float(self.q0[i]) - self.low_state.motor_state[idx].q
+                self.tau_i[i] = np.clip(self.tau_i[i] + self.Ki * err_i * self.dt,
+                                        -self.tau_i_max, self.tau_i_max)
+                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
+                self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
+
+            if self.n_tick % 40 == 0 or self.hold_percent >= 1:
+                q = np.array([self.low_state.motor_state[self.JOINT_REORDERING[i]].q for i in range(12)])
+                err = q - self.q0
+                tag = "final alignment" if self.hold_percent >= 1 else "hold"
+                print(f"{tag} err vs q0: " + np.array2string(err, precision=3, suppress_small=True)
+                      + f"  max|err|: {np.max(np.abs(err)):.3f}", flush=True)
+
+        elif (self.hold_percent >= 1) and (self.ii < self.traj_end):
 
             imu_quat = np.array(self.low_state.imu_state.quaternion)
 
@@ -244,7 +299,9 @@ class Custom:
             self.h = np.concatenate(hs)
             v = o @ wo + bo
 
-            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
+            # hand the static load over to the policy: fade the hold torque out
+            fade = max(0.0, 1.0 - (self.ii / self.stride) / self.handoff_fade_ticks)
+            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit) + fade * self.tau_i
             q_des = self.x_ref[self.ii][7:19]
             dq_des = self.x_ref[self.ii][25:37]
 
@@ -265,7 +322,7 @@ class Custom:
 
             self.ii += self.stride
 
-        elif (self.alignment_percent >= 1) and (self.ii >= self.traj_end) and (self.settle_percent < 1):
+        elif (self.hold_percent >= 1) and (self.ii >= self.traj_end) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
@@ -292,7 +349,9 @@ if __name__ == '__main__':
         custom.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         custom.lowcmd_publisher.Init()
         custom.low_state = unitree_go_msg_dds__LowState_()
+        custom.fold_percent = 1
         custom.alignment_percent = 1
+        custom.hold_percent = 1
         custom.Start()
         time.sleep(8)
         sys.exit(0)
@@ -317,7 +376,15 @@ if __name__ == '__main__':
                     state=np.array(custom.log_state))
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
-               print(f"{nm}: n={len(a)} avg {a.mean():.2f} p99 {np.percentile(a, 99):.2f} max {a.max():.2f} ms")
+               print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
+                     f"p99 {np.percentile(a, 99):.2f} max {a.max():.2f} ms")
+           S = np.array(custom.log_state)
+           if len(S):
+               ti = S[:, 0].astype(int)
+               qerr = S[:, 1:13] - custom.x_ref[ti, 7:19]
+               querr = S[:, 25:29] - custom.x_ref[ti, 3:7]
+               print(f"tracking: joint err rms {np.sqrt((qerr ** 2).mean()):.4f} max {np.abs(qerr).max():.4f} rad, "
+                     f"quat err max {np.abs(querr).max():.4f}")
            print("Done!")
            sys.exit(-1)
         time.sleep(1)
