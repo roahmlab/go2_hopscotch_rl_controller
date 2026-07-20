@@ -25,6 +25,17 @@ from jax import numpy as jp
 from scipy.spatial.transform import Rotation
 
 import pyvicon_datastream as pv
+import logging
+import threading
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+USE_LOGGING = True
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 class Custom:
     def __init__(self):
@@ -185,6 +196,10 @@ class Custom:
         # Unitree Go2: [FR, FL, RR, RL]
         self.JOINT_REORDERING = jp.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
+        # logging
+        self.q_log = np.full((self.traj_length, 18), np.nan)
+        self.estop_event = threading.Event()
+
 
     # Public methods
     def Init(self):
@@ -255,6 +270,18 @@ class Custom:
         if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
             return
         
+        if self.estop_event.is_set():
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = 0.0
+                self.low_cmd.motor_cmd[idx].dq = 0.0
+                self.low_cmd.motor_cmd[idx].kp = 0.0
+                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].tau = 0.0
+            self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+            self.lowcmd_publisher.Write(self.low_cmd)
+            return
+        
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
@@ -301,13 +328,16 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = 5.0
                 self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
 
-        elif (self.hold_percent >= 1) and (self.ii < self.traj_length):
+        elif self.ii < self.traj_length:
 
             if self.record_odom:
                 self.init_xyz = jp.array(self.fb_pos)
                 self.init_xyz = self.init_xyz.at[2].set(0)
                 self.init_quat_inv = math.quat_inv(self.fb_quat)
                 self.record_odom = False
+
+            if USE_LOGGING:
+                t_infer_start = time.perf_counter()
 
             # current
             dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
@@ -334,7 +364,9 @@ class Custom:
             q_rel = math.quat_mul(math.quat_inv(base_quat), base_quat_ref)
             ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
 
-            cur = [proj_gravity, ang_vel_body, lin_vel_body, dof_pos - q_ref[6:18], dof_vel - v_ref[6:18], base_pos - q_ref[0:3], ori_err, onehot, self.last_action]
+            joint_err = dof_pos - q_ref[6:18]
+            base_err = base_pos - q_ref[0:3]
+            cur = [proj_gravity, ang_vel_body, lin_vel_body, joint_err, dof_vel - v_ref[6:18], base_err, ori_err, onehot, self.last_action]
             current = jp.concatenate(cur)
 
 
@@ -363,6 +395,9 @@ class Custom:
             action, _ = self.policy(obs, self.policy_key)
             action = np.clip(action, -1.0, 1.0)
 
+            if USE_LOGGING:
+                infer_ms = 1000.0 * (time.perf_counter() - t_infer_start)
+
             q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
 
             tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
@@ -384,9 +419,22 @@ class Custom:
 
             self.last_action = action.copy()
 
+            if USE_LOGGING:
+                base_err_np = np.asarray(base_err)
+                logging.info(
+                    "step %3d/%d | infer %6.2f ms | base_err [% .3f % .3f % .3f] m | ori_err %.3f | joint_err max %.3f rad",
+                    self.ii, self.traj_length, infer_ms,
+                    base_err_np[0], base_err_np[1], base_err_np[2],
+                    np.linalg.norm(np.asarray(ori_err)),
+                    np.max(np.abs(np.asarray(joint_err))))
+                
+                self.q_log[self.ii, 0:3] = base_pos
+                self.q_log[self.ii, 3:6] = Rotation.from_quat(np.asarray(base_quat), scalar_first=True).as_euler("XYZ")
+                self.q_log[self.ii, 6:18] = dof_pos
+
             self.ii += 1
 
-        elif (self.hold_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
+        else:
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
@@ -412,6 +460,37 @@ class Custom:
             self.fb_pos = jp.array(pos)
             self.fb_quat = jp.array(rot)
 
+    def RequestEStop(self):
+        self.estop_event.set()
+
+    def PlotJointTracking(self, out_path):
+        n = min(self.ii, self.traj_length)
+        if n == 0:
+            print("No trajectory-phase data logged (e-stop triggered before tracking began) — nothing to plot.")
+            return
+        t = self.dt * np.arange(n)
+        fig, axes = plt.subplots(6, 3, figsize=(15, 10), squeeze=False)
+        for j in range(18):
+            r, c = j // 3, j % 3
+            ax = axes[r, c]
+            ax.plot(t, self.q_log[:n, j], label="actual")
+            ax.plot(t, self.q_ref[:n, j], "--", label="reference")
+
+            labels = ["fb x", "fb y", "fb z",
+                      "roll", "pitch", "yaw",
+                      "FL hip", "FL thigh", "FL calf",
+                      "FR hip", "FR thigh", "FR calf",
+                      "RL hip", "RL thigh", "RL calf",
+                      "RR hip", "RR thigh", "RR calf"]
+            
+            ax.set_ylabel(labels[j])
+            ax.grid(True)
+        axes[0, 0].legend()
+        plt.xlabel("time [s]")
+        plt.tight_layout()
+        fig.savefig(out_path)
+        print(f"Saved {out_path}")
+
 
 
 if __name__ == '__main__':
@@ -428,9 +507,19 @@ if __name__ == '__main__':
     custom.Init()
     custom.Start()
 
-    while True:        
-        if custom.settle_percent >= 1:
-           time.sleep(1)
-           print("Done!")
-           sys.exit(-1)     
-        time.sleep(1)
+    input("Press Enter to stop deployment...")
+    custom.RequestEStop()
+    print("E-STOP triggered — entering joint damping mode.")
+    time.sleep(2.0)   # let the robot settle in damping mode before doing anything else
+
+    custom.PlotJointTracking(os.path.join(os.path.dirname(__file__), "hopscotch_tracking.png"))
+
+    print("Done!")
+    sys.exit(-1)
+
+    # while True:        
+    #     if custom.settle_percent >= 1:
+    #        time.sleep(1)
+    #        print("Done!")
+    #        sys.exit(-1)     
+    #     time.sleep(1)
