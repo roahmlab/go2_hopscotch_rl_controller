@@ -257,6 +257,7 @@ class Custom:
         elif (self.hold_percent >= 1) and (self.ii < self.traj_end):
 
             imu_quat = np.array(self.low_state.imu_state.quaternion)
+            imu_quat = imu_quat / np.linalg.norm(imu_quat)
 
             if self.record_odom:
                 self.q_off = quat_mul(self.x_ref[0][3:7], quat_inv(imu_quat))
@@ -271,6 +272,7 @@ class Custom:
             dof_vel = dof_vel[self.JOINT_REORDERING]
 
             base_quat = quat_mul(self.q_off, imu_quat)
+            base_quat = base_quat / np.linalg.norm(base_quat)
             ang_vel_body = np.array(self.low_state.imu_state.gyroscope)
 
             x = np.zeros(37)
