@@ -38,6 +38,7 @@ class Custom:
 
         self.dt = 0.005
         self.stride = 5
+        self.traj_end = 1000
 
         self.preview_offsets = (25, 50, 100)
         self.obs_idx = np.r_[3:19, 22:37]
@@ -68,6 +69,10 @@ class Custom:
         self.inf_sum = 0.0
         self.inf_max = 0.0
         self.n_tick = 0
+        self.log_tick = []
+        self.log_align = []
+        self.log_inf = []
+        self.log_state = []
 
         # Load reference trajectory
         f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories.npz"))
@@ -93,7 +98,7 @@ class Custom:
 
         # Get q0 and qf
         self.q0 = self.x_ref[0][7:19]
-        self.qf = self.x_ref[self.traj_length][7:19]
+        self.qf = self.x_ref[self.traj_end][7:19]
 
         # Record initial orientation offset
         self.firstRun = True
@@ -164,6 +169,9 @@ class Custom:
             dtick = now - self.tick_prev
             self.tick_sum += dtick
             self.tick_max = max(self.tick_max, dtick)
+            self.log_tick.append(dtick)
+            if self.alignment_percent < 1:
+                self.log_align.append(dtick)
             self.n_tick += 1
             if self.n_tick % 200 == 0:
                 print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
@@ -191,7 +199,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        elif (self.alignment_percent >= 1) and (self.ii < self.traj_length):
+        elif (self.alignment_percent >= 1) and (self.ii < self.traj_end):
 
             imu_quat = np.array(self.low_state.imu_state.quaternion)
 
@@ -252,10 +260,12 @@ class Custom:
             inf = time.perf_counter() - inf_t0
             self.inf_sum += inf
             self.inf_max = max(self.inf_max, inf)
+            self.log_inf.append(inf)
+            self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat, ang_vel_body, v]))
 
             self.ii += self.stride
 
-        elif (self.alignment_percent >= 1) and (self.ii >= self.traj_length) and (self.settle_percent < 1):
+        elif (self.alignment_percent >= 1) and (self.ii >= self.traj_end) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
@@ -302,6 +312,12 @@ if __name__ == '__main__':
     while True:
         if custom.settle_percent >= 1:
            time.sleep(1)
+           np.savez("run_log.npz", tick=np.array(custom.log_tick),
+                    align=np.array(custom.log_align), inf=np.array(custom.log_inf),
+                    state=np.array(custom.log_state))
+           for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
+               a = 1e3 * np.array(a)
+               print(f"{nm}: n={len(a)} avg {a.mean():.2f} p99 {np.percentile(a, 99):.2f} max {a.max():.2f} ms")
            print("Done!")
            sys.exit(-1)
         time.sleep(1)
