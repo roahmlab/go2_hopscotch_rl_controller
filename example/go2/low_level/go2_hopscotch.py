@@ -136,13 +136,38 @@ class Custom:
             rc.get("obs_size"), rc.get("action_size"),
             preprocess_observations_fn=normalize, **nf_kwargs)
         params = brax_model.load_params(params_path)
-        self.policy = ppo_networks.make_inference_fn(net)(params, deterministic=True)
+        self.policy = jax.jit(ppo_networks.make_inference_fn(net)(params, deterministic=True))
+        self.policy_key = jax.random.PRNGKey(0)
 
         # Get q0 and qf
         self.q0 = jp.array(data[0]['q'][0][6:])
         self.qf = jp.array(data[-1]['q'][-1][6:])
 
         self.traj_length = self.q_ref.shape[0]
+
+        
+        # JIT-compiled preview assembly (a bare jax.vmap re-traces on every call)
+        q_ref, v_ref = self.q_ref, self.v_ref
+        contacts, onehots = self.contacts, self.onehots
+        traj_length, offsets = self.traj_length, self.preview_offsets
+
+        def _preview(ii, dof_pos):
+            def prev(off):
+                j = (ii + off) % traj_length
+                return jp.concatenate([q_ref[j, 6:18] - dof_pos, v_ref[j, 6:18],
+                                       contacts[j].astype(jp.float32), onehots[j]])
+            return jax.vmap(prev)(offsets).reshape(-1)
+
+        self._preview_fn = jax.jit(_preview)
+
+        # warm up (compile) the jitted functions now so the first policy tick
+        # doesn't stall the 50 Hz control loop on XLA compilation
+        obs_size = rc.get("obs_size")
+        if isinstance(obs_size, dict):
+            obs_size = obs_size["state"]
+        self._preview_fn(0, jp.zeros(12)).block_until_ready()
+        self.policy(jp.zeros(obs_size), self.policy_key)[0].block_until_ready()
+
 
         # Record initial odometry
         self.firstRun = True
@@ -314,11 +339,7 @@ class Custom:
 
 
             # future
-            def prev(off):
-                j = (self.ii + off) % self.traj_length
-                return jp.concatenate([self.q_ref[j, 6:18] - dof_pos, self.v_ref[j, 6:18],
-                                    self.contacts[j].astype(jp.float32), self.onehots[j]])
-            preview = jax.vmap(prev)(self.preview_offsets).reshape(-1)
+            preview = self._preview_fn(self.ii, dof_pos)
 
 
             # ff
@@ -339,10 +360,10 @@ class Custom:
             obs = jp.concatenate([current, preview, ff, hist])
             obs = jp.clip(jp.nan_to_num(obs), -100.0, 100.0)
 
-            action, _ = self.policy(obs, jax.random.PRNGKey(0))
+            action, _ = self.policy(obs, self.policy_key)
             action = np.clip(action, -1.0, 1.0)
 
-            q_des = q_ref[6:18] + self.action_scale * action
+            q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
 
             tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
 
