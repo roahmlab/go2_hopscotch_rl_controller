@@ -1,7 +1,7 @@
 import time
 import sys
 import os
-import json
+import pickle
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -15,138 +15,82 @@ import unitree_legged_const as go2
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 
-import jax
 import numpy as np
-from brax import math
-from brax.io import model as brax_model
-from brax.training.acme import running_statistics
-from brax.training.agents.ppo import networks as ppo_networks
-from jax import numpy as jp
-from scipy.spatial.transform import Rotation
 
-import pyvicon_datastream as pv
+
+def quat_mul(a, b):
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return np.array([w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                     w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                     w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2])
+
+
+def quat_inv(q):
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
 
 class Custom:
     def __init__(self):
-        self.Kp = 50.0
-        self.Kd = 0.5
+        self.Kp = 40.0
+        self.Kd = 10.0
 
-        self.dt = 0.02
-        self.stride = 20
+        self.dt = 0.005
+        self.stride = 5
 
-        self.preview_offsets = jp.arange(1, 5) * 2
-
-        self.init_history = True
-        self.history = None
-        self.last_action = jp.zeros(12)
+        self.preview_offsets = (25, 50, 100)
+        self.obs_idx = np.r_[3:19, 22:37]
 
         self.ii = 0
 
-        self.low_cmd = unitree_go_msg_dds__LowCmd_()  
-        self.low_state = None  
-
-        # fb info
-        self.fb_pos = None
-        self.fb_prev = None
-        self.fb_quat = None
-        self.mocap_dt = 0.01
+        self.low_cmd = unitree_go_msg_dds__LowCmd_()
+        self.low_state = None
 
         self.startPos = [0.0] * 12
-        self.alignment_duration = 50
+        self.alignment_duration = 400
         self.alignment_percent = 0
 
-        self.settle_duration = 50
+        self.settle_duration = 400
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
-        rc = json.load(open(os.path.join(base_dir, "hopscotch_utils", "run_config.json")))
 
         # thread handling
         self.lowCmdWriteThreadPtr = None
-        self.mocapThreadPtr = None
 
         self.crc = CRC()
 
         # Load reference trajectory
-        data_fp = os.path.join(base_dir, "hopscotch_utils", "traj_hopscotch_friction_6cm_lsq.json")
-        with open(data_fp, 'r') as file:
-            data = json.load(file)
+        f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories.npz"))
+        x_ref, u_ref = f["x_refs"], f["u_refs"]
+        if x_ref.ndim == 3:
+            x_ref, u_ref = x_ref[0], u_ref[0]
+        self.x_ref = np.asarray(x_ref, dtype=np.float64)
+        self.u_ref = np.asarray(u_ref, dtype=np.float64)
+        self.traj_length = self.u_ref.shape[0]
 
-        self.onehots = jp.zeros((0, 3))
-        self.contacts = jp.zeros((0, 4))
-        self.q_ref = jp.zeros((0, 18))
-        self.v_ref = jp.zeros((0, 18))
-        self.a_ref = jp.zeros((0, 18))
-        self.u_ref = jp.zeros((0, 12))
-
-        jj = 0
-        for mode in data:
-            mode_T = int(mode['T'] / mode['dt'])
-
-            if mode['name'] == "4_stance":
-                oh = jp.array([1, 0, 0])
-            elif mode['name'] == "flying":
-                oh = jp.array([0, 1, 0])
-            elif mode['name'] == "diag_stance":
-                oh = jp.array([0, 0, 1])
-            else:
-                raise Exception("Unrecognized Phase: " + mode['name'])
-            
-            contacts = jp.array(["FL_foot" in mode['contacts'], "FR_foot" in mode['contacts'], "RL_foot" in mode['contacts'], "RR_foot" in mode['contacts']])
-
-            while jj < mode_T:
-                self.onehots = jp.vstack((self.onehots, oh))
-                self.contacts = jp.vstack((self.contacts, contacts))
-                self.q_ref = jp.vstack((self.q_ref, jp.array(mode['q'][jj])))
-                self.v_ref = jp.vstack((self.v_ref, jp.array(mode['v'][jj])))
-                self.a_ref = jp.vstack((self.a_ref, jp.array(mode['a'][jj])))
-                self.u_ref = jp.vstack((self.u_ref, jp.array(mode['u'][jj])))
-
-                jj += self.stride
-            
-            jj = jj % mode_T
-
-        self.q_ref = self.q_ref.at[:, 2].set(self.q_ref[:, 2] + rc.get('config')['reftrack']['ref_z_offset'])
-        self.u_ref = self.u_ref + rc.get('config')['reftrack']['ff_damping_comp'] * self.v_ref[:, 6:18] + rc.get('config')['reftrack']['ff_armature_comp'] * self.a_ref[:, 6:18]
-
-        # Load RL policy (from Cesar RL repo)
-        params_path = os.path.join(base_dir, "hopscotch_utils", "params_final.pkl")
-
-        nf_kwargs = dict(
-            policy_hidden_layer_sizes=tuple(rc["policy_hidden"]),
-            value_hidden_layer_sizes=tuple(rc["value_hidden"]))
-        if rc.get("asymmetric_obs"):
-            nf_kwargs.update(policy_obs_key="state",
-                            value_obs_key="privileged_state")
-        normalize = (running_statistics.normalize
-                    if rc.get("normalize_observations", True) else (lambda x, y: x))
-        net = ppo_networks.make_ppo_networks(
-            rc.get("obs_size"), rc.get("action_size"),
-            preprocess_observations_fn=normalize, **nf_kwargs)
-        params = brax_model.load_params(params_path)
-        self.policy = ppo_networks.make_inference_fn(net)(params, deterministic=True)
+        # Load blind GRU actor (from residual-controller shac2)
+        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind.pkl"), 'rb') as file:
+            ck = pickle.load(file)
+        self.actor = ck["actor"]
+        self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
+        self.h = np.zeros(self.h_offs[-1])
 
         # Get q0 and qf
-        self.q0 = jp.array(data[0]['q'][0][6:])
-        self.qf = jp.array(data[-1]['q'][-1][6:])
+        self.q0 = self.x_ref[0][7:19]
+        self.qf = self.x_ref[self.traj_length][7:19]
 
-        self.traj_length = self.q_ref.shape[0]
-
-        # Record initial odometry
+        # Record initial orientation offset
         self.firstRun = True
         self.record_odom = True
-        self.init_xyz = None
-        self.init_quat_inv = None
+        self.q_off = None
 
-        self.tau_limit = jp.array(np.tile(np.asarray(rc.get("config")['env']['torque_limit']), 4))
-        self.tau_ff_clip = self.tau_limit * rc.get("config")['env']['ff_clip_frac']
-
-        # run config parameters
-        self.action_scale = rc.get("config")['env']['action_scale']
+        self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
-        self.JOINT_REORDERING = jp.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
+        self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
 
     # Public methods
@@ -157,18 +101,11 @@ class Custom:
         self.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         self.lowcmd_publisher.Init()
 
-        # create subscriber # 
+        # create subscriber #
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
 
-        # start vicon
-        self.TARGET = "go2"
-        self.vicon = pv.PyViconDatastream()
-        self.vicon.set_stream_mode(pv.StreamMode.ServerPush)
-        self.vicon.connect("192.168.0.149")
-        self.vicon.enable_segment_data()
-
-        self.sc = SportClient()  
+        self.sc = SportClient()
         self.sc.SetTimeout(5.0)
         self.sc.Init()
 
@@ -184,10 +121,6 @@ class Custom:
             time.sleep(1)
 
     def Start(self):
-        self.mocapThreadPtr = RecurrentThread(
-            interval=self.mocap_dt, target=self.UpdateMocap, name="updatemocap"
-        )
-        self.mocapThreadPtr.Start()
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd"
         )
@@ -209,15 +142,12 @@ class Custom:
 
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
-        # print("FR_0 motor state: ", msg.motor_state[go2.LegID["FR_0"]])
-        # print("IMU state: ", msg.imu_state)
-        # print("Battery state: voltage: ", msg.power_v, "current: ", msg.power_a)
 
     def LowCmdWrite(self):
 
-        if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
+        if self.low_state is None:
             return
-        
+
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
@@ -237,94 +167,63 @@ class Custom:
 
         elif (self.alignment_percent >= 1) and (self.ii < self.traj_length):
 
+            imu_quat = np.array(self.low_state.imu_state.quaternion)
+
             if self.record_odom:
-                self.init_xyz = jp.array(self.fb_pos)
-                self.init_xyz = self.init_xyz.at[2].set(0)
-                self.init_quat_inv = math.quat_inv(self.fb_quat)
+                self.q_off = quat_mul(self.x_ref[0][3:7], quat_inv(imu_quat))
                 self.record_odom = False
 
             # current
-            dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
-            dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
-            dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
-            dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
-        
-            world_quat = jp.array(self.fb_quat)
-            base_pos = math.rotate(self.fb_pos - self.init_xyz, self.init_quat_inv)
-            base_quat = math.quat_mul(world_quat, self.init_quat_inv)
-            world_to_body = math.quat_inv(world_quat)
-            base_vel = (self.fb_pos - self.fb_prev) / self.mocap_dt
-            lin_vel_body = math.rotate(base_vel, world_to_body)
-            ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
-            proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
+            dof_pos = np.array([self.low_state.motor_state[i].q for i in range(12)])
+            dof_vel = np.array([self.low_state.motor_state[i].dq for i in range(12)])
+            dof_pos = dof_pos[self.JOINT_REORDERING]
+            dof_vel = dof_vel[self.JOINT_REORDERING]
 
-            q_ref = self.q_ref[self.ii]
-            v_ref = self.v_ref[self.ii]
-            a_ref = self.a_ref[self.ii]
-            u_ref = self.u_ref[self.ii]
-            onehot = self.onehots[self.ii]
+            base_quat = quat_mul(self.q_off, imu_quat)
+            ang_vel_body = np.array(self.low_state.imu_state.gyroscope)
 
-            base_quat_ref = Rotation.from_euler("XYZ", q_ref[3:6]).as_quat(scalar_first=True)
-            q_rel = math.quat_mul(math.quat_inv(base_quat), base_quat_ref)
-            ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
+            x = np.zeros(37)
+            x[3:7] = base_quat
+            x[7:19] = dof_pos
+            x[22:25] = ang_vel_body
+            x[25:37] = dof_vel
 
-            cur = [proj_gravity, ang_vel_body, lin_vel_body, dof_pos - q_ref[6:18], dof_vel - v_ref[6:18], base_pos - q_ref[0:3], ori_err, onehot, self.last_action]
-            current = jp.concatenate(cur)
-
-
-            # future
-            def prev(off):
-                j = (self.ii + off) % self.traj_length
-                return jp.concatenate([self.q_ref[j, 6:18] - dof_pos, self.v_ref[j, 6:18],
-                                    self.contacts[j].astype(jp.float32), self.onehots[j]])
-            preview = jax.vmap(prev)(self.preview_offsets).reshape(-1)
-
-
-            # ff
-            ff = [a_ref[6:18], u_ref / self.tau_limit]
-            ff = jp.concatenate(ff)
-
-
-            # past
-            if self.init_history:
-                tau_applied = self.Kp * (self.q0 - dof_pos) - self.Kd * dof_vel
-                self.history = np.tile(np.concatenate((dof_pos, dof_vel, base_pos, ang_vel_body, tau_applied)), (16, 1))
-                self.init_history = False
-
-            hist = self.history[::2, :].reshape(-1)
-
+            obs = [x[self.obs_idx], (self.x_ref[self.ii] - x)[self.obs_idx],
+                   self.u_ref[self.ii], [self.ii / self.traj_length]]
+            for off in self.preview_offsets:
+                obs.append(self.x_ref[min(self.ii + off, self.traj_length)][7:19])
+            obs = np.concatenate(obs)
 
             # policy inference
-            obs = jp.concatenate([current, preview, ff, hist])
-            obs = jp.clip(jp.nan_to_num(obs), -100.0, 100.0)
+            o = obs
+            hs = []
+            for j, (wz, uz, bz, wr, ur, br, wh, uh, bh) in enumerate(self.actor[0]):
+                hl = self.h[self.h_offs[j]:self.h_offs[j + 1]]
+                z = 1.0 / (1.0 + np.exp(-(o @ wz + hl @ uz + bz)))
+                r = 1.0 / (1.0 + np.exp(-(o @ wr + hl @ ur + br)))
+                n = np.tanh(o @ wh + (r * hl) @ uh + bh)
+                o = (1.0 - z) * n + z * hl
+                hs.append(o)
+            wo, bo = self.actor[1]
+            self.h = np.concatenate(hs)
+            v = o @ wo + bo
 
-            action, _ = self.policy(obs, jax.random.PRNGKey(0))
-            action = np.clip(action, -1.0, 1.0)
-
-            q_des = q_ref[6:18] + self.action_scale * action
-
-            tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
+            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
+            q_des = self.x_ref[self.ii][7:19]
+            dq_des = self.x_ref[self.ii][25:37]
 
             # set joint commands
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
                 self.low_cmd.motor_cmd[idx].q = float(q_des[i])
-                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].dq = float(dq_des[i])
                 self.low_cmd.motor_cmd[idx].kp = self.Kp
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
-                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
+                self.low_cmd.motor_cmd[idx].tau = float(tau[i])
 
+            self.ii += self.stride
 
-            # update history
-            tau_applied = tau_ff + self.Kp * (q_des - dof_pos) - self.Kd * dof_vel
-            self.history[:-1, :] = self.history[1:, :]
-            self.history[-1, :] = np.concatenate((dof_pos, dof_vel, base_pos, ang_vel_body, tau_applied))
-
-            self.last_action = action.copy()
-
-            self.ii += 1
-
-        elif (self.alignment_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
+        elif (self.alignment_percent >= 1) and (self.ii >= self.traj_length) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
@@ -339,16 +238,6 @@ class Custom:
 
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
         self.lowcmd_publisher.Write(self.low_cmd)
-
-    def UpdateMocap(self):
-        if self.vicon.get_frame() == pv.Result.Success:
-            seg = self.vicon.get_subject_root_segment_name(self.TARGET)
-            pos = 0.001 * self.vicon.get_segment_global_translation(self.TARGET, seg)
-            rot = np.roll(self.vicon.get_segment_global_quaternion(self.TARGET, seg), 1)
-
-            self.fb_prev = self.fb_pos
-            self.fb_pos = jp.array(pos)
-            self.fb_quat = jp.array(rot)
 
 
 
@@ -366,9 +255,9 @@ if __name__ == '__main__':
     custom.Init()
     custom.Start()
 
-    while True:        
+    while True:
         if custom.settle_percent >= 1:
            time.sleep(1)
            print("Done!")
-           sys.exit(-1)     
+           sys.exit(-1)
         time.sleep(1)
