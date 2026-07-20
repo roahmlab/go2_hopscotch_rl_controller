@@ -52,8 +52,20 @@ class Custom:
         self.mocap_dt = 0.01
 
         self.startPos = [0.0] * 12
+
+        self.foldPos = jp.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
+                            0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
+        self.fold_duration = 50      # lie -> fold, 1.0 s at 50 Hz
+        self.fold_percent = 0
+
         self.alignment_duration = 50
         self.alignment_percent = 0
+
+        self.hold_duration = 150     # 3.0 s
+        self.hold_percent = 0
+        self.Ki = 100.0
+        self.tau_i_max = 15.0
+        self.tau_i = np.zeros(12)    # MuJoCo order
 
         self.settle_duration = 50
         self.settle_percent = 0
@@ -222,20 +234,49 @@ class Custom:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
             self.firstRun = False
 
-        if self.alignment_percent < 1:
+        if self.fold_percent < 1:
+
+            self.fold_percent += 1.0 / self.fold_duration
+            self.fold_percent = min(self.fold_percent, 1)
+
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.fold_percent) * self.startPos[i] + self.fold_percent * self.foldPos[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = 60.0
+                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].tau = 0
+
+        elif self.alignment_percent < 1:
 
             self.alignment_percent += 1.0 / self.alignment_duration
             self.alignment_percent = min(self.alignment_percent, 1)
 
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
-                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.startPos[i] + self.alignment_percent * self.q0[i])
+                self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.foldPos[i] + self.alignment_percent * self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = self.Kp
-                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].kp = 60.0
+                self.low_cmd.motor_cmd[idx].kd = 5.0
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        elif (self.alignment_percent >= 1) and (self.ii < self.traj_length):
+        elif self.hold_percent < 1:
+
+            self.hold_percent += 1.0 / self.hold_duration
+            self.hold_percent = min(self.hold_percent, 1)
+
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                err_i = float(self.q0[i]) - self.low_state.motor_state[idx].q
+                self.tau_i[i] = np.clip(self.tau_i[i] + self.Ki * err_i * self.dt,
+                                        -self.tau_i_max, self.tau_i_max)
+                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = 60.0
+                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
+
+        elif (self.hold_percent >= 1) and (self.ii < self.traj_length):
 
             if self.record_odom:
                 self.init_xyz = jp.array(self.fb_pos)
@@ -324,7 +365,7 @@ class Custom:
 
             self.ii += 1
 
-        elif (self.alignment_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
+        elif (self.hold_percent >= 1) and (self.ii == self.traj_length) and (self.settle_percent < 1):
 
             self.settle_percent += 1.0 / self.settle_duration
             self.settle_percent = min(self.settle_percent, 1)
