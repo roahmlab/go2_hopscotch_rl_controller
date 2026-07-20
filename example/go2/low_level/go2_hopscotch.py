@@ -512,7 +512,8 @@ if __name__ == '__main__':
     print("E-STOP triggered — entering joint damping mode.")
     time.sleep(2.0)   # let the robot settle in damping mode before doing anything else
 
-    custom.PlotJointTracking(os.path.join(os.path.dirname(__file__), "hopscotch_tracking.png"))
+    if USE_LOGGING:
+        custom.PlotJointTracking(os.path.join(os.path.dirname(__file__), "hopscotch_tracking.png"))
 
     print("Done!")
     sys.exit(-1)
