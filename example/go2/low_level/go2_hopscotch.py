@@ -126,6 +126,9 @@ class Custom:
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
+        self.gyro_alpha = 0.5
+        self.gyro_f = None
+
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
         self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
@@ -273,7 +276,11 @@ class Custom:
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
-            ang_vel_body = np.array(self.low_state.imu_state.gyroscope)
+            gyro_raw = np.array(self.low_state.imu_state.gyroscope)
+            if self.gyro_f is None:
+                self.gyro_f = gyro_raw
+            self.gyro_f = self.gyro_f + self.gyro_alpha * (gyro_raw - self.gyro_f)
+            ang_vel_body = self.gyro_f
 
             x = np.zeros(37)
             x[3:7] = base_quat
