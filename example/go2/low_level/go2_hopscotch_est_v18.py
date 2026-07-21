@@ -624,9 +624,8 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="/mnt/ws-frb/users/vansht/resrl/go2_hopscotch/"
-                                            "hendeca_v18_cprev/model_1499.pt")
-    ap.add_argument("--traj", default="/home/vansht/this_time/traj_hopscotch_friction.json")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/model_1499.pt")
+    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction.json")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
