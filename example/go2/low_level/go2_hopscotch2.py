@@ -17,6 +17,10 @@ from unitree_sdk2py.go2.sport.sport_client import SportClient
 
 import numpy as np
 
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+import jax
+import jax.numpy as jnp
+
 
 def quat_mul(a, b):
     w1, x1, y1, z1 = a
@@ -50,7 +54,6 @@ class Custom:
         self.dt = 0.005
         self.stride = 5
         self.traj_end = 3400
-
 
         self.ii = 0
 
@@ -111,21 +114,45 @@ class Custom:
         self.traj_length = self.u_ref.shape[0]
         self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
 
-        # Load blind GRU actor (from residual-controller shac1, euler_v2 obs)
-        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind.pkl"), 'rb') as file:
+        # Load blind transformer actor (from residual-controller shac2, euler_v2 obs)
+        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind2.pkl"), 'rb') as file:
             ck = pickle.load(file)
-        self.actor = ck["actor"]
+        apj = jax.tree_util.tree_map(lambda a: jnp.asarray(a, jnp.float32), ck["actor"])
+        tf = ck["tf"]
+        K, D, HD = tf["k_obs"], tf["d"], tf["heads"]
+        dh = D // HD
+        self.k_obs = K
+        self.nf = ck["actor"][0].shape[0]
+        self.buf = None
         self.preview_offsets = tuple(int(o) for o in ck["preview"])
-        assert self.actor[0][0][0].shape[0] == 73 + 30 * len(self.preview_offsets), \
-            f"obs width {73 + 30 * len(self.preview_offsets)} != actor NF {self.actor[0][0][0].shape[0]}"
-        self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
-        self.h = np.zeros(self.h_offs[-1], dtype=np.float32)
+        assert self.nf == 73 + 30 * len(self.preview_offsets), \
+            f"obs width {73 + 30 * len(self.preview_offsets)} != actor NF {self.nf}"
 
-        # warm up inference
-        o = np.zeros(self.actor[0][0][0].shape[0], dtype=np.float32)
-        for wz, uz, *_ in self.actor[0]:
-            o = 1.0 / (1.0 + np.exp(-(o @ wz + self.h[:uz.shape[0]] @ uz)))
-        o = o @ self.actor[1][0]
+        def ln(z, gm, bt):
+            return (z - z.mean(-1, keepdims=True)) / jnp.sqrt(z.var(-1, keepdims=True) + 1e-6) * gm + bt
+
+        def tf_apply(buf):
+            we, be, pos, blocks, (gf, bf), (wh, bh) = apj
+            x = buf @ we + be + pos
+            for (g1, b1, wq, bq, wk, bk, wv, bv, wu, bu, g2, b2, w1, c1, w2, c2) in blocks:
+                y = ln(x, g1, b1)
+                q = (y @ wq + bq).reshape(K, HD, dh)
+                kk = (y @ wk + bk).reshape(K, HD, dh)
+                vv = (y @ wv + bv).reshape(K, HD, dh)
+                at = jax.nn.softmax(jnp.einsum("qhd,khd->hqk", q, kk) / jnp.sqrt(dh), axis=-1)
+                x = x + jnp.einsum("hqk,khd->qhd", at, vv).reshape(K, D) @ wu + bu
+                y = ln(x, g2, b2)
+                x = x + jax.nn.gelu(y @ w1 + c1) @ w2 + c2
+            x = ln(x, gf, bf)
+            return x[-1] @ wh + bh
+
+        self.policy_fn = jax.jit(tf_apply)
+
+        # warm up (compile) the jitted transformer so the first tick doesn't stall
+        print("compiling transformer ...", flush=True)
+        t0 = time.perf_counter()
+        self.policy_fn(jnp.zeros((K, self.nf), jnp.float32)).block_until_ready()
+        print(f"compiled in {time.perf_counter() - t0:.1f}s", flush=True)
 
         # Get q0 and qf
         self.q0 = self.x_ref[0][7:19]
@@ -137,7 +164,7 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
-        self.gyro_alpha = 0.5
+        self.gyro_alpha = 1.0
         self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
@@ -333,19 +360,12 @@ class Custom:
                 obs.append(np.concatenate([self.eul_ref[tp], xp[7:19], xp[22:25], xp[25:37]]))
             obs = np.clip(np.nan_to_num(np.concatenate(obs)), -1e4, 1e4).astype(np.float32)
 
-            # policy inference
-            o = obs
-            hs = []
-            for j, (wz, uz, bz, wr, ur, br, wh, uh, bh) in enumerate(self.actor[0]):
-                hl = self.h[self.h_offs[j]:self.h_offs[j + 1]]
-                z = 1.0 / (1.0 + np.exp(-(o @ wz + hl @ uz + bz)))
-                r = 1.0 / (1.0 + np.exp(-(o @ wr + hl @ ur + br)))
-                n = np.tanh(o @ wh + (r * hl) @ uh + bh)
-                o = (1.0 - z) * n + z * hl
-                hs.append(o)
-            wo, bo = self.actor[1]
-            self.h = np.concatenate(hs)
-            v = o @ wo + bo
+            # policy inference (jitted transformer over a rolling obs buffer)
+            if self.buf is None:
+                self.buf = np.tile(obs, (self.k_obs, 1))
+            else:
+                self.buf = np.concatenate([self.buf[1:], obs[None]], 0)
+            v = np.asarray(self.policy_fn(jnp.asarray(self.buf)))
 
             tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
             if not np.isfinite(tau).all():
