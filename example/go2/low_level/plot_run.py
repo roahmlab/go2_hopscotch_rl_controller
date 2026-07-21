@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation
 BASE = Path(__file__).resolve().parent
 LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else BASE / "run_log.npz"
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else LOG.with_suffix(".png")
-JOINTS = [f"{leg}_{j}" for leg in ("FL", "FR", "RL", "RR") for j in ("abd", "hip", "knee")]
+JOINTS = [f"{leg} {j}" for leg in ("FL", "FR", "RL", "RR") for j in ("hip", "thigh", "calf")]
 
 f = np.load(BASE / "hopscotch_utils" / "trajectories.npz")
 X = f["x_refs"]
@@ -37,7 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(10, 3, figsize=(16, 26), sharex=True)
+fig, axes = plt.subplots(6, 3, figsize=(16, 17), sharex=True)
 ax = axes.flat[0]
 for k, lb in enumerate("wxyz"):
     ax.plot(tt, quat[:, k], lw=1.0, label=lb)
@@ -67,12 +67,7 @@ for i in range(12):
 for ax in axes[-1]:
     ax.set_xlabel("time [s]")
 axes.flat[4].legend(fontsize=7)
-for i in range(12):
-    ax = axes.flat[16 + i]
-    ax.plot(tt, v[:, i], lw=1.0, color="tab:red")
-    ax.set_ylabel("v " + JOINTS[i] + " [Nm]")
-    ax.grid(alpha=0.3)
-for ax in axes.flat[28:]:
+for ax in axes.flat[16:]:
     ax.axis("off")
 fig.suptitle("go2 hardware run vs reference (solid = measured, dashed = ref)", y=0.995)
 fig.tight_layout()

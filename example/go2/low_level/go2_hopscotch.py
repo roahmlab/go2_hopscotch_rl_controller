@@ -1,12 +1,7 @@
-import gc
 import time
 import sys
 import os
 import pickle
-
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -36,6 +31,13 @@ def quat_inv(q):
     return np.array([q[0], -q[1], -q[2], -q[3]])
 
 
+def quat2eul(q):
+    w, x, y, z = q
+    r02 = 2 * (x * z + w * y); r12 = 2 * (y * z - w * x); r22 = 1 - 2 * (x * x + y * y)
+    r01 = 2 * (x * y - w * z); r00 = 1 - 2 * (y * y + z * z)
+    return np.array([np.arctan2(-r12, r22), np.arcsin(np.clip(r02, -1, 1)), np.arctan2(-r01, r00)])
+
+
 class Custom:
     def __init__(self):
         self.Kp = 40.0
@@ -45,12 +47,11 @@ class Custom:
         self.Kp_stand = 60.0
         self.Kd_stand = 5.0
 
-        self.dt = 0.002
-        self.stride = 2
+        self.dt = 0.005
+        self.stride = 5
         self.traj_end = 3400
 
-        self.preview_offsets = (25, 50, 100)
-        self.obs_idx = np.r_[3:19, 22:37]
+        self.preview_offsets = (25, 50, 100, 200, 500, 1000)
 
         self.ii = 0
 
@@ -62,21 +63,21 @@ class Custom:
         # folded pose (feet tucked under hips, unloaded), MuJoCo order [FL, FR, RL, RR]
         self.foldPos = np.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
                                  0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
-        self.fold_duration = 500
+        self.fold_duration = 200
         self.fold_percent = 0
 
-        self.alignment_duration = 500
+        self.alignment_duration = 200
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_duration = 1500
+        self.hold_duration = 600
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)
-        self.handoff_fade_ticks = 250
+        self.handoff_fade_ticks = 100
 
-        self.settle_duration = 1000
+        self.settle_duration = 400
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
@@ -106,16 +107,17 @@ class Custom:
         self.x_ref = np.asarray(x_ref, dtype=np.float64)
         self.u_ref = np.asarray(u_ref, dtype=np.float64)
         self.traj_length = self.u_ref.shape[0]
+        self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
 
-        # Load blind GRU actor (from residual-controller shac2)
+        # Load blind GRU actor (from residual-controller shac1, euler_v2 obs)
         with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind.pkl"), 'rb') as file:
             ck = pickle.load(file)
         self.actor = ck["actor"]
         self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
-        self.h = np.zeros(self.h_offs[-1])
+        self.h = np.zeros(self.h_offs[-1], dtype=np.float32)
 
         # warm up inference
-        o = np.zeros(self.actor[0][0][0].shape[0])
+        o = np.zeros(self.actor[0][0][0].shape[0], dtype=np.float32)
         for wz, uz, *_ in self.actor[0]:
             o = 1.0 / (1.0 + np.exp(-(o @ wz + self.h[:uz.shape[0]] @ uz)))
         o = o @ self.actor[1][0]
@@ -128,11 +130,10 @@ class Custom:
         self.firstRun = True
         self.record_odom = True
         self.q_off = None
+        self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        self.fault = False
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
-
-        self.gyro_alpha = 0.25
-        self.gyro_f = None
 
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
@@ -200,13 +201,25 @@ class Custom:
             if self.hold_percent < 1:
                 self.log_align.append(dtick)
             self.n_tick += 1
-            if self.n_tick % 500 == 0:
-                print(f"tick avg {1e3 * self.tick_sum / 500:.2f} max {1e3 * self.tick_max:.2f} ms | "
-                      f"inference avg {1e3 * self.inf_sum / 500:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
+            if self.n_tick % 200 == 0:
+                print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
+                      f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
                 self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
         self.tick_prev = now
 
         if self.low_state is None:
+            return
+
+        if self.fault:
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = 0.0
+                self.low_cmd.motor_cmd[idx].dq = 0.0
+                self.low_cmd.motor_cmd[idx].kp = 0.0
+                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].tau = 0.0
+            self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+            self.lowcmd_publisher.Write(self.low_cmd)
             return
 
         if self.firstRun:
@@ -255,7 +268,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
 
-            if self.n_tick % 100 == 0 or self.hold_percent >= 1:
+            if self.n_tick % 40 == 0 or self.hold_percent >= 1:
                 q = np.array([self.low_state.motor_state[self.JOINT_REORDERING[i]].q for i in range(12)])
                 err = q - self.q0
                 tag = "final alignment" if self.hold_percent >= 1 else "hold"
@@ -265,7 +278,12 @@ class Custom:
         elif (self.hold_percent >= 1) and (self.ii < self.traj_end):
 
             imu_quat = np.array(self.low_state.imu_state.quaternion)
-            imu_quat = imu_quat / np.linalg.norm(imu_quat)
+            nq = np.linalg.norm(imu_quat)
+            if nq > 1e-6:
+                imu_quat = imu_quat / nq
+                self.last_quat = imu_quat
+            else:
+                imu_quat = self.last_quat
 
             if self.record_odom:
                 self.q_off = quat_mul(self.x_ref[0][3:7], quat_inv(imu_quat))
@@ -281,11 +299,7 @@ class Custom:
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
-            gyro_raw = np.array(self.low_state.imu_state.gyroscope)
-            if self.gyro_f is None:
-                self.gyro_f = gyro_raw
-            self.gyro_f = self.gyro_f + self.gyro_alpha * (gyro_raw - self.gyro_f)
-            ang_vel_body = self.gyro_f
+            ang_vel_body = np.array(self.low_state.imu_state.gyroscope)
 
             x = np.zeros(37)
             x[3:7] = base_quat
@@ -293,11 +307,17 @@ class Custom:
             x[22:25] = ang_vel_body
             x[25:37] = dof_vel
 
-            obs = [x[self.obs_idx], (self.x_ref[self.ii] - x)[self.obs_idx],
-                   self.u_ref[self.ii], [self.ii / self.traj_length]]
+            eul = quat2eul(base_quat)
+            xr = self.x_ref[self.ii]
+            st = np.concatenate([eul, dof_pos, ang_vel_body, dof_vel])
+            rf = np.concatenate([self.eul_ref[self.ii], xr[7:19], xr[22:25], xr[25:37]])
+            upd = self.u_ref[self.ii] + self.Kp * (xr[7:19] - dof_pos) + self.Kd * (xr[25:37] - dof_vel)
+            obs = [st, rf - st, upd, [self.ii / self.traj_length]]
             for off in self.preview_offsets:
-                obs.append(self.x_ref[min(self.ii + off, self.traj_length)][7:19])
-            obs = np.concatenate(obs)
+                tp = min(self.ii + off, self.traj_length)
+                xp = self.x_ref[tp]
+                obs.append(np.concatenate([self.eul_ref[tp], xp[7:19], xp[22:25], xp[25:37]]))
+            obs = np.clip(np.nan_to_num(np.concatenate(obs)), -1e4, 1e4).astype(np.float32)
 
             # policy inference
             o = obs
@@ -313,9 +333,11 @@ class Custom:
             self.h = np.concatenate(hs)
             v = o @ wo + bo
 
-            # hand the static load over to the policy: fade the hold torque out
-            fade = max(0.0, 1.0 - (self.ii / self.stride) / self.handoff_fade_ticks)
-            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit) + fade * self.tau_i
+            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
+            if not np.isfinite(tau).all():
+                self.fault = True
+                print("FAULT: non-finite command, entering damping mode", flush=True)
+                return
             q_des = self.x_ref[self.ii][7:19]
             dq_des = self.x_ref[self.ii][25:37]
 
@@ -380,7 +402,6 @@ if __name__ == '__main__':
 
     custom = Custom()
     custom.Init()
-    gc.disable()
     custom.Start()
 
     while True:
