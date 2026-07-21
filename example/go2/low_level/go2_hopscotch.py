@@ -314,7 +314,7 @@ class Custom:
         elif self.ii < self.traj_length:
 
             if self.record_odom:
-                self.init_quat_inv = math.quat_inv(self.low_state.imu_state.quaternion)
+                self.init_quat_inv = math.quat_inv(jp.array(self.low_state.imu_state.quaternion))
                 self.record_odom = False
 
             if USE_LOGGING:
