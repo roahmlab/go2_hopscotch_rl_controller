@@ -12,6 +12,7 @@ from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwi
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 '''
 python deploy_reference_traj_friction.py eth0 ../../data/go2/FR/reference_FR_cand0.csv
+python deploy_reference_traj_friction.py eth0 ../../data/go2/FR/reference_FR_cand0.csv
 '''
 # --- Sysid config --- #
 
