@@ -1,12 +1,7 @@
-import gc
 import time
 import sys
 import os
 import pickle
-
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -45,8 +40,8 @@ class Custom:
         self.Kp_stand = 60.0
         self.Kd_stand = 5.0
 
-        self.dt = 0.002
-        self.stride = 2
+        self.dt = 0.005
+        self.stride = 5
         self.traj_end = 3400
 
         self.preview_offsets = (25, 50, 100)
@@ -62,21 +57,21 @@ class Custom:
         # folded pose (feet tucked under hips, unloaded), MuJoCo order [FL, FR, RL, RR]
         self.foldPos = np.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
                                  0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
-        self.fold_duration = 500
+        self.fold_duration = 200
         self.fold_percent = 0
 
-        self.alignment_duration = 500
+        self.alignment_duration = 200
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_duration = 1500
+        self.hold_duration = 600
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)
-        self.handoff_fade_ticks = 250
+        self.handoff_fade_ticks = 100
 
-        self.settle_duration = 1000
+        self.settle_duration = 400
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
@@ -131,7 +126,7 @@ class Custom:
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
-        self.gyro_alpha = 0.25
+        self.gyro_alpha = 0.5
         self.gyro_f = None
 
         # MuJoCo: [FL, FR, RL, RR]
@@ -200,9 +195,9 @@ class Custom:
             if self.hold_percent < 1:
                 self.log_align.append(dtick)
             self.n_tick += 1
-            if self.n_tick % 500 == 0:
-                print(f"tick avg {1e3 * self.tick_sum / 500:.2f} max {1e3 * self.tick_max:.2f} ms | "
-                      f"inference avg {1e3 * self.inf_sum / 500:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
+            if self.n_tick % 200 == 0:
+                print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
+                      f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
                 self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
         self.tick_prev = now
 
@@ -255,7 +250,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
 
-            if self.n_tick % 100 == 0 or self.hold_percent >= 1:
+            if self.n_tick % 40 == 0 or self.hold_percent >= 1:
                 q = np.array([self.low_state.motor_state[self.JOINT_REORDERING[i]].q for i in range(12)])
                 err = q - self.q0
                 tag = "final alignment" if self.hold_percent >= 1 else "hold"
@@ -380,7 +375,6 @@ if __name__ == '__main__':
 
     custom = Custom()
     custom.Init()
-    gc.disable()
     custom.Start()
 
     while True:

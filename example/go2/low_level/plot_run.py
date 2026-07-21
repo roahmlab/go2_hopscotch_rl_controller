@@ -37,7 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(10, 3, figsize=(16, 26), sharex=True)
+fig, axes = plt.subplots(6, 3, figsize=(16, 17), sharex=True)
 ax = axes.flat[0]
 for k, lb in enumerate("wxyz"):
     ax.plot(tt, quat[:, k], lw=1.0, label=lb)
@@ -67,12 +67,7 @@ for i in range(12):
 for ax in axes[-1]:
     ax.set_xlabel("time [s]")
 axes.flat[4].legend(fontsize=7)
-for i in range(12):
-    ax = axes.flat[16 + i]
-    ax.plot(tt, v[:, i], lw=1.0, color="tab:red")
-    ax.set_ylabel("v " + JOINTS[i] + " [Nm]")
-    ax.grid(alpha=0.3)
-for ax in axes.flat[28:]:
+for ax in axes.flat[16:]:
     ax.axis("off")
 fig.suptitle("go2 hardware run vs reference (solid = measured, dashed = ref)", y=0.995)
 fig.tight_layout()
