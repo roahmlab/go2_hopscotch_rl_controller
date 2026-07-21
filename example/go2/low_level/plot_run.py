@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation
 BASE = Path(__file__).resolve().parent
 LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else BASE / "run_log.npz"
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else LOG.with_suffix(".png")
-JOINTS = [f"{leg}_{j}" for leg in ("FL", "FR", "RL", "RR") for j in ("abd", "hip", "knee")]
+JOINTS = [f"{leg} {j}" for leg in ("FL", "FR", "RL", "RR") for j in ("hip", "thigh", "calf")]
 
 f = np.load(BASE / "hopscotch_utils" / "trajectories.npz")
 X = f["x_refs"]
