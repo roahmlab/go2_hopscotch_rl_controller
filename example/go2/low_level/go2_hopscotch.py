@@ -98,6 +98,9 @@ class Custom:
         self.log_align = []
         self.log_inf = []
         self.log_state = []
+        self.log_sat = []
+        self.sat_peak = 0.0
+        self.sat_cnt = 0
 
         # Load reference trajectory
         f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories.npz"))
@@ -205,8 +208,11 @@ class Custom:
             self.n_tick += 1
             if self.n_tick % 200 == 0:
                 print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
-                      f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms", flush=True)
+                      f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms | "
+                      f"sat {self.sat_cnt}/200 peak {self.sat_peak:.2f}x", flush=True)
                 self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
+                self.sat_peak = 0.0
+                self.sat_cnt = 0
         self.tick_prev = now
 
         if self.low_state is None:
@@ -347,6 +353,13 @@ class Custom:
             q_des = self.x_ref[self.ii][7:19]
             dq_des = self.x_ref[self.ii][25:37]
 
+            # torque-saturation check: full firmware torque = PD + tau vs motor limit
+            total = self.Kp * (q_des - dof_pos) + self.Kd * (dq_des - dof_vel) + tau
+            ratio = np.abs(total) / self.tau_limit
+            self.sat_peak = max(self.sat_peak, float(ratio.max()))
+            self.sat_cnt += int((ratio >= 1.0).any())
+            self.log_sat.append([self.ii, int((ratio >= 1.0).sum()), float(ratio.max())])
+
             # set joint commands
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
@@ -415,7 +428,7 @@ if __name__ == '__main__':
            time.sleep(1)
            np.savez("run_log.npz", tick=np.array(custom.log_tick),
                     align=np.array(custom.log_align), inf=np.array(custom.log_inf),
-                    state=np.array(custom.log_state))
+                    state=np.array(custom.log_state), sat=np.array(custom.log_sat))
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
                print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
