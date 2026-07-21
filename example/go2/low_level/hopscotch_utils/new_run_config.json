@@ -1,0 +1,373 @@
+{
+  "code": "go2rt",
+  "exp": "ryan_a1_ffpd",
+  "variant": "A0",
+  "overrides": {
+    "reftrack.ref_z_offset": 0.0175,
+    "reftrack.ff_damping_comp": 2.0,
+    "reftrack.ff_armature_comp": 0.01,
+    "env.parallel_ff": true,
+    "env.use_true_forcerange": true,
+    "reftrack.obs_blocks": [
+      "proj_gravity",
+      "base_angvel",
+      "joint_pos_err",
+      "joint_vel_err",
+      "base_ori_err",
+      "phase_onehot",
+      "last_action",
+      "ref_preview",
+      "ref_feedforward",
+      "history"
+    ],
+    "reftrack.history_frame_blocks": [
+      "dof_pos",
+      "dof_vel",
+      "base_angvel",
+      "torque_applied"
+    ]
+  },
+  "stages": [
+    {
+      "num_timesteps": 600000000,
+      "overrides": {}
+    }
+  ],
+  "seed": 0,
+  "smoke": false,
+  "obs_size": 508,
+  "action_size": 12,
+  "ref_len": 171,
+  "total_budget": 600000000,
+  "asymmetric_obs": false,
+  "policy_hidden": [
+    512,
+    256,
+    128
+  ],
+  "value_hidden": [
+    512,
+    256,
+    128
+  ],
+  "normalize_observations": true,
+  "action_mode": "position_pd",
+  "config": {
+    "env": {
+      "action_mode": "position_pd",
+      "sim_dt": 0.002,
+      "decimation": 10,
+      "episode_length": 200,
+      "action_scale": 0.3,
+      "kp": 50.0,
+      "kd": 0.5,
+      "torque_limit": [
+        23.7,
+        23.7,
+        45.4
+      ],
+      "torque_kd": 0.0,
+      "default_joint_angles": [
+        0.0,
+        0.9,
+        -1.8
+      ],
+      "add_obs_noise": false,
+      "noise_dof_pos": 0.01,
+      "noise_dof_vel": 1.5,
+      "noise_gravity": 0.05,
+      "noise_ang_vel": 0.2,
+      "noise_lin_vel": 0.1,
+      "termination_gravity_z": -0.5,
+      "foot_contact_height": 0.03,
+      "push_enable": false,
+      "push_interval_steps": 100,
+      "push_lin_vel": 0.6,
+      "push_flight_scale": 0.3,
+      "use_true_forcerange": true,
+      "parallel_ff": true,
+      "ff_clip_frac": 0.8,
+      "parallel_vel": false,
+      "kv": 1.0,
+      "dq_residual_scale": 1.0,
+      "noise_base_pos": 0.01
+    },
+    "reward": {
+      "torques": -0.0001,
+      "action_rate": -0.01,
+      "joint_acc": -2.5e-07,
+      "joint_limits": -5.0,
+      "w_jpos": 0.55,
+      "w_bz": 0.35,
+      "w_bori": 0.3,
+      "w_bxy": 0.2,
+      "w_cmatch": 0.4,
+      "w_jvel": 0.05,
+      "w_blv": 0.1,
+      "w_bav": 0.1,
+      "sig_jpos": 0.4,
+      "sig_bz": 0.0025,
+      "sig_bori": 0.05,
+      "sig_bxy": 0.01,
+      "sig_jvel": 10.0,
+      "sig_blv": 1.0,
+      "sig_bav": 2.0,
+      "foot_slip": -2.0,
+      "residual": -0.05,
+      "torque_rate": 0.0,
+      "completion": 5.0,
+      "termination_ref": -5.0,
+      "w_unsched": 0.0,
+      "w_clearance": 0.0,
+      "clearance_target": 0.05,
+      "cmatch_phase_w": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "tracking_terms": null,
+      "penalty_terms": null,
+      "extra": {}
+    },
+    "dr": {
+      "enable": true,
+      "friction": {
+        "train": [
+          0.3,
+          1.5
+        ],
+        "ood": [
+          0.15,
+          2.2
+        ]
+      },
+      "mass_scale": {
+        "train": [
+          0.8,
+          1.2
+        ],
+        "ood": [
+          0.6,
+          1.4
+        ]
+      },
+      "inertia_scale": {
+        "train": [
+          0.8,
+          1.2
+        ],
+        "ood": [
+          0.6,
+          1.4
+        ]
+      },
+      "damping_scale": {
+        "train": [
+          0.5,
+          1.5
+        ],
+        "ood": [
+          0.3,
+          2.0
+        ]
+      },
+      "armature_scale": {
+        "train": [
+          0.8,
+          1.2
+        ],
+        "ood": [
+          0.6,
+          1.4
+        ]
+      },
+      "motor_strength": {
+        "train": [
+          0.9,
+          1.1
+        ],
+        "ood": [
+          0.8,
+          1.2
+        ]
+      },
+      "added_mass": {
+        "train": [
+          -1.0,
+          3.0
+        ],
+        "ood": [
+          -1.5,
+          5.0
+        ]
+      },
+      "com_offset": {
+        "train": [
+          -0.02,
+          0.02
+        ],
+        "ood": [
+          -0.04,
+          0.04
+        ]
+      },
+      "joint_friction": {
+        "train": [
+          0.0,
+          0.3
+        ],
+        "ood": [
+          0.0,
+          0.6
+        ]
+      },
+      "ground_solref": {
+        "train": [
+          0.01,
+          0.03
+        ],
+        "ood": [
+          0.008,
+          0.05
+        ]
+      },
+      "gravity_tilt_deg": {
+        "train": [
+          0.0,
+          0.0
+        ],
+        "ood": [
+          0.0,
+          0.0
+        ]
+      },
+      "train_on_ood": false
+    },
+    "ppo": {
+      "num_timesteps": 600000000,
+      "num_envs": 4096,
+      "num_evals": 20,
+      "episode_length": 200,
+      "unroll_length": 20,
+      "num_minibatches": 32,
+      "num_updates_per_batch": 4,
+      "batch_size": 1024,
+      "learning_rate": 0.0003,
+      "entropy_cost": 0.01,
+      "discounting": 0.99,
+      "gae_lambda": 0.95,
+      "clipping_epsilon": 0.2,
+      "reward_scaling": 1.0,
+      "max_grad_norm": 1.0,
+      "normalize_observations": true,
+      "seed": 0,
+      "policy_hidden": [
+        512,
+        256,
+        128
+      ],
+      "value_hidden": [
+        512,
+        256,
+        128
+      ],
+      "learning_rate_schedule": null,
+      "desired_kl": 0.01
+    },
+    "reftrack": {
+      "ref_path": "data/traj_hopscotch_friction_6cm_lsq.json",
+      "rsi_enable": true,
+      "rsi_min_remaining": 10,
+      "rsi_event_frac": 0.4,
+      "rsi_event_window": 2,
+      "reset_joint_pos_noise": 0.03,
+      "reset_joint_vel_noise": 0.3,
+      "reset_base_pos_noise": 0.02,
+      "reset_base_ori_noise": 0.03,
+      "tail_steps": 20,
+      "thr_pos": 0.3,
+      "thr_ori": 0.8,
+      "flight_thr_mult": 1.6,
+      "ct_kp": 40.0,
+      "ct_kd": 1.0,
+      "residual_torque_frac": 0.5,
+      "use_uref": true,
+      "learn_gains": false,
+      "gain_log_range": 0.6931,
+      "kp_dr": [
+        0.8,
+        1.2
+      ],
+      "kd_dr": [
+        0.5,
+        1.5
+      ],
+      "foot_contact_margin": 0.0015,
+      "n_future": 4,
+      "future_dt": 0.04,
+      "obs_history_len": 8,
+      "obs_history_stride": 2,
+      "dr_scale": 1.0,
+      "sigma_scale": 1.0,
+      "ref_z_offset": 0.0175,
+      "ff_damping_comp": 2.0,
+      "ff_armature_comp": 0.01,
+      "rsi_t0_frac": 0.0,
+      "action_latency_prob": 0.0,
+      "base_xy_drift": 0.0,
+      "asymmetric_obs": false,
+      "priv_include_grf": false,
+      "obs_ref_grf": false,
+      "timewarp_range": [
+        1.0,
+        1.0
+      ],
+      "term_unsched_phases": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "term_unsched_grace": 2,
+      "term_contact_height": 0.02,
+      "obs_foot_clearance": false,
+      "obs_phase_clock": false,
+      "obs_blocks": [
+        "proj_gravity",
+        "base_angvel",
+        "joint_pos_err",
+        "joint_vel_err",
+        "base_ori_err",
+        "phase_onehot",
+        "last_action",
+        "ref_preview",
+        "ref_feedforward",
+        "history"
+      ],
+      "history_frame_blocks": [
+        "dof_pos",
+        "dof_vel",
+        "base_angvel",
+        "torque_applied"
+      ],
+      "termination_terms": null
+    }
+  },
+  "git_sha": "7ce3f42c14c64f1d272497cfbd8e7ce595930b1e-dirty",
+  "hostname": "blob.engin.umich.edu",
+  "argv": [
+    "/home/ryantsai/athletic-loco-manipulation-roahm-fork/refactored_v1/go2rt/experiments/run.py",
+    "ryan_a1_ffpd"
+  ],
+  "attempt": 1,
+  "first_start_ts": "2026-07-20T23:43:34-04:00",
+  "start_ts": "2026-07-20T23:43:34-04:00",
+  "status": "done",
+  "ref_sha256": "e020f80ded8ef8d0f5e07146ad180d24cb118d6c459b6c2387dc94c1bbbc2832",
+  "versions": {
+    "jax": "0.10.2",
+    "python": "3.12.13"
+  },
+  "end_ts": "2026-07-21T07:45:13-04:00",
+  "total_steps": 600000000,
+  "elapsed_s": 28899.42597413063
+}

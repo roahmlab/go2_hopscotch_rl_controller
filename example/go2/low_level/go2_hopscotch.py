@@ -24,7 +24,6 @@ from brax.training.agents.ppo import networks as ppo_networks
 from jax import numpy as jp
 from scipy.spatial.transform import Rotation
 
-import pyvicon_datastream as pv
 import logging
 import threading
 import matplotlib
@@ -56,12 +55,6 @@ class Custom:
         self.low_cmd = unitree_go_msg_dds__LowCmd_()  
         self.low_state = None  
 
-        # fb info
-        self.fb_pos = None
-        self.fb_prev = None
-        self.fb_quat = None
-        self.mocap_dt = 0.01
-
         self.startPos = [0.0] * 12
 
         self.foldPos = jp.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
@@ -83,7 +76,7 @@ class Custom:
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
-        rc = json.load(open(os.path.join(base_dir, "hopscotch_utils", "run_config.json")))
+        rc = json.load(open(os.path.join(base_dir, "hopscotch_utils", "new_run_config.json")))
 
         # thread handling
         self.lowCmdWriteThreadPtr = None
@@ -134,7 +127,7 @@ class Custom:
         self.u_ref = self.u_ref + rc.get('config')['reftrack']['ff_damping_comp'] * self.v_ref[:, 6:18] + rc.get('config')['reftrack']['ff_armature_comp'] * self.a_ref[:, 6:18]
 
         # Load RL policy (from Cesar RL repo)
-        params_path = os.path.join(base_dir, "hopscotch_utils", "params_final.pkl")
+        params_path = os.path.join(base_dir, "hopscotch_utils", "new_params_final.pkl")
 
         nf_kwargs = dict(
             policy_hidden_layer_sizes=tuple(rc["policy_hidden"]),
@@ -198,7 +191,7 @@ class Custom:
         self.JOINT_REORDERING = jp.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
 
         # logging
-        self.q_log = np.full((self.traj_length, 18), np.nan)
+        self.q_log = np.full((self.traj_length, 15), np.nan)
         self.estop_event = threading.Event()
 
 
@@ -213,13 +206,6 @@ class Custom:
         # create subscriber # 
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
-
-        # start vicon
-        self.TARGET = "go2"
-        self.vicon = pv.PyViconDatastream()
-        self.vicon.set_stream_mode(pv.StreamMode.ServerPush)
-        self.vicon.connect("192.168.0.149")
-        self.vicon.enable_segment_data()
 
         self.sc = SportClient()  
         self.sc.SetTimeout(5.0)
@@ -237,10 +223,6 @@ class Custom:
             time.sleep(1)
 
     def Start(self):
-        self.mocapThreadPtr = RecurrentThread(
-            interval=self.mocap_dt, target=self.UpdateMocap, name="updatemocap"
-        )
-        self.mocapThreadPtr.Start()
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd"
         )
@@ -268,7 +250,7 @@ class Custom:
 
     def LowCmdWrite(self):
 
-        if self.low_state is None or self.fb_pos is None or self.fb_prev is None:
+        if self.low_state is None:
             return
         
         if self.estop_event.is_set():
@@ -332,9 +314,7 @@ class Custom:
         elif self.ii < self.traj_length:
 
             if self.record_odom:
-                self.init_xyz = jp.array(self.fb_pos)
-                self.init_xyz = self.init_xyz.at[2].set(0)
-                self.init_quat_inv = math.quat_inv(self.fb_quat)
+                self.init_quat_inv = math.quat_inv(self.low_state.imu_state.quaternion)
                 self.record_odom = False
 
             if USE_LOGGING:
@@ -346,12 +326,9 @@ class Custom:
             dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
             dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
         
-            world_quat = jp.array(self.fb_quat)
-            base_pos = math.rotate(self.fb_pos - self.init_xyz, self.init_quat_inv)
+            world_quat = jp.array(self.low_state.imu_state.quaternion)
             base_quat = math.quat_mul(world_quat, self.init_quat_inv)
             world_to_body = math.quat_inv(world_quat)
-            base_vel = (self.fb_pos - self.fb_prev) / self.mocap_dt
-            lin_vel_body = math.rotate(base_vel, world_to_body)
             ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
             proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
 
@@ -366,8 +343,13 @@ class Custom:
             ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
 
             joint_err = dof_pos - q_ref[6:18]
-            base_err = base_pos - q_ref[0:3]
-            cur = [proj_gravity, ang_vel_body, lin_vel_body, joint_err, dof_vel - v_ref[6:18], base_err, ori_err, onehot, self.last_action]
+            cur = [proj_gravity, 
+                   ang_vel_body, 
+                   joint_err, 
+                   dof_vel - v_ref[6:18], 
+                   ori_err, 
+                   onehot, 
+                   self.last_action]
             current = jp.concatenate(cur)
 
 
@@ -383,7 +365,10 @@ class Custom:
             # past
             if self.init_history:
                 tau_applied = self.Kp * (self.q0 - dof_pos) - self.Kd * dof_vel
-                self.history = np.tile(np.concatenate((dof_pos, dof_vel, base_pos, ang_vel_body, tau_applied)), (16, 1))
+                self.history = np.tile(np.concatenate((dof_pos, 
+                                                       dof_vel, 
+                                                       ang_vel_body, 
+                                                       tau_applied)), (16, 1))
                 self.init_history = False
 
             hist = self.history[::2, :].reshape(-1)
@@ -418,22 +403,22 @@ class Custom:
             # update history
             tau_applied = tau_ff + self.Kp * (q_des - dof_pos) - self.Kd * dof_vel
             self.history[:-1, :] = self.history[1:, :]
-            self.history[-1, :] = np.concatenate((dof_pos, dof_vel, base_pos, ang_vel_body, tau_applied))
+            self.history[-1, :] = np.concatenate((dof_pos, 
+                                                  dof_vel, 
+                                                  ang_vel_body, 
+                                                  tau_applied))
 
             self.last_action = action.copy()
 
             if USE_LOGGING:
-                base_err_np = np.asarray(base_err)
                 logging.info(
-                    "step %3d/%d | infer %6.2f ms | base_err [% .3f % .3f % .3f] m | ori_err %.3f | joint_err max %.3f rad",
+                    "step %3d/%d | infer %6.2f ms | ori_err %.3f | joint_err max %.3f rad",
                     self.ii, self.traj_length, infer_ms,
-                    base_err_np[0], base_err_np[1], base_err_np[2],
                     np.linalg.norm(np.asarray(ori_err)),
                     np.max(np.abs(np.asarray(joint_err))))
                 
-                self.q_log[self.ii, 0:3] = base_pos
-                self.q_log[self.ii, 3:6] = Rotation.from_quat(np.asarray(base_quat), scalar_first=True).as_euler("XYZ")
-                self.q_log[self.ii, 6:18] = dof_pos
+                self.q_log[self.ii, 0:3] = Rotation.from_quat(np.asarray(base_quat), scalar_first=True).as_euler("XYZ")
+                self.q_log[self.ii, 3:15] = dof_pos
 
             self.ii += 1
 
@@ -453,16 +438,6 @@ class Custom:
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
         self.lowcmd_publisher.Write(self.low_cmd)
 
-    def UpdateMocap(self):
-        if self.vicon.get_frame() == pv.Result.Success:
-            seg = self.vicon.get_subject_root_segment_name(self.TARGET)
-            pos = 0.001 * self.vicon.get_segment_global_translation(self.TARGET, seg)
-            rot = np.roll(self.vicon.get_segment_global_quaternion(self.TARGET, seg), 1)
-
-            self.fb_prev = self.fb_pos
-            self.fb_pos = jp.array(pos)
-            self.fb_quat = jp.array(rot)
-
     def RequestEStop(self):
         self.estop_event.set()
 
@@ -472,15 +447,14 @@ class Custom:
             print("No trajectory-phase data logged (e-stop triggered before tracking began) — nothing to plot.")
             return
         t = self.dt * np.arange(n)
-        fig, axes = plt.subplots(6, 3, figsize=(15, 10), squeeze=False)
-        for j in range(18):
+        fig, axes = plt.subplots(5, 3, figsize=(15, 10), squeeze=False)
+        for j in range(15):
             r, c = j // 3, j % 3
             ax = axes[r, c]
             ax.plot(t, self.q_log[:n, j], label="actual")
             ax.plot(t, self.q_ref[:n, j], "--", label="reference")
 
-            labels = ["fb x", "fb y", "fb z",
-                      "roll", "pitch", "yaw",
+            labels = ["roll", "pitch", "yaw",
                       "FL hip", "FL thigh", "FL calf",
                       "FR hip", "FR thigh", "FR calf",
                       "RL hip", "RL thigh", "RL calf",
