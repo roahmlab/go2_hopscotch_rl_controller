@@ -73,7 +73,6 @@ class Custom:
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)    # MuJoCo order
-        self.handoff_fade_ticks = 25
 
         self.settle_duration = 50
         self.settle_percent = 0
@@ -161,7 +160,7 @@ class Custom:
 
         def _preview(ii, dof_pos):
             def prev(off):
-                j = (ii + off) % traj_length
+                j = jp.minimum(ii + off, traj_length - 1)
                 return jp.concatenate([q_ref[j, 6:18] - dof_pos, v_ref[j, 6:18],
                                        contacts[j].astype(jp.float32), onehots[j]])
             return jax.vmap(prev)(offsets).reshape(-1)
@@ -388,8 +387,7 @@ class Custom:
 
             q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
 
-            fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
-            tau_ff = np.clip(u_ref + fade * self.tau_i, -self.tau_ff_clip, self.tau_ff_clip)
+            tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
 
             # set joint commands
             for i in range(12):
