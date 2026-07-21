@@ -41,6 +41,9 @@ class Custom:
         self.Kp = 50.0
         self.Kd = 0.5
 
+        self.Kp_align = 60.0
+        self.Kd_align = 5.0
+
         self.dt = 0.02
         self.stride = 20
 
@@ -277,8 +280,8 @@ class Custom:
                 idx = self.JOINT_REORDERING[i]
                 self.low_cmd.motor_cmd[idx].q = float((1 - self.fold_percent) * self.startPos[i] + self.fold_percent * self.foldPos[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = 60.0
-                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_align
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_align
                 self.low_cmd.motor_cmd[idx].tau = 0
 
         elif self.alignment_percent < 1:
@@ -290,8 +293,8 @@ class Custom:
                 idx = self.JOINT_REORDERING[i]
                 self.low_cmd.motor_cmd[idx].q = float((1 - self.alignment_percent) * self.foldPos[i] + self.alignment_percent * self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = 60.0
-                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_align
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_align
                 self.low_cmd.motor_cmd[idx].tau = 0
 
         elif self.hold_percent < 1:
@@ -306,119 +309,119 @@ class Custom:
                                         -self.tau_i_max, self.tau_i_max)
                 self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
                 self.low_cmd.motor_cmd[idx].dq = 0
-                self.low_cmd.motor_cmd[idx].kp = 60.0
-                self.low_cmd.motor_cmd[idx].kd = 5.0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_align
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_align
                 self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
 
-        # elif self.ii < self.traj_length:
+        elif self.ii < self.traj_length:
 
-        #     if self.record_odom:
-        #         self.init_quat_inv = math.quat_inv(jp.array(self.low_state.imu_state.quaternion))
-        #         self.record_odom = False
+            if self.record_odom:
+                self.init_quat_inv = math.quat_inv(jp.array(self.low_state.imu_state.quaternion))
+                self.record_odom = False
 
-        #     if USE_LOGGING:
-        #         t_infer_start = time.perf_counter()
+            if USE_LOGGING:
+                t_infer_start = time.perf_counter()
 
-        #     # current
-        #     dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
-        #     dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
-        #     dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
-        #     dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
+            # current
+            dof_pos = jp.array([self.low_state.motor_state[i].q for i in range(12)])
+            dof_vel = jp.array([self.low_state.motor_state[i].dq for i in range(12)])
+            dof_pos = dof_pos.at[self.JOINT_REORDERING].get()
+            dof_vel = dof_vel.at[self.JOINT_REORDERING].get()
         
-        #     world_quat = jp.array(self.low_state.imu_state.quaternion)
-        #     base_quat = math.quat_mul(world_quat, self.init_quat_inv)
-        #     world_to_body = math.quat_inv(world_quat)
-        #     ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
-        #     proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
+            world_quat = jp.array(self.low_state.imu_state.quaternion)
+            base_quat = math.quat_mul(world_quat, self.init_quat_inv)
+            world_to_body = math.quat_inv(world_quat)
+            ang_vel_body = jp.array(self.low_state.imu_state.gyroscope)
+            proj_gravity = math.rotate(jp.array([0.0, 0.0, -1.0]), world_to_body)
 
-        #     q_ref = self.q_ref[self.ii]
-        #     v_ref = self.v_ref[self.ii]
-        #     a_ref = self.a_ref[self.ii]
-        #     u_ref = self.u_ref[self.ii]
-        #     onehot = self.onehots[self.ii]
+            q_ref = self.q_ref[self.ii]
+            v_ref = self.v_ref[self.ii]
+            a_ref = self.a_ref[self.ii]
+            u_ref = self.u_ref[self.ii]
+            onehot = self.onehots[self.ii]
 
-        #     base_quat_ref = Rotation.from_euler("XYZ", q_ref[3:6]).as_quat(scalar_first=True)
-        #     q_rel = math.quat_mul(math.quat_inv(base_quat), base_quat_ref)
-        #     ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
+            base_quat_ref = Rotation.from_euler("XYZ", q_ref[3:6]).as_quat(scalar_first=True)
+            q_rel = math.quat_mul(math.quat_inv(base_quat), base_quat_ref)
+            ori_err = 2.0 * jp.sign(q_rel[0] + 1e-8) * q_rel[1:4]
 
-        #     joint_err = dof_pos - q_ref[6:18]
-        #     cur = [proj_gravity, 
-        #            ang_vel_body, 
-        #            joint_err, 
-        #            dof_vel - v_ref[6:18], 
-        #            ori_err, 
-        #            onehot, 
-        #            self.last_action]
-        #     current = jp.concatenate(cur)
-
-
-        #     # future
-        #     preview = self._preview_fn(self.ii, dof_pos)
+            joint_err = dof_pos - q_ref[6:18]
+            cur = [proj_gravity, 
+                   ang_vel_body, 
+                   joint_err, 
+                   dof_vel - v_ref[6:18], 
+                   ori_err, 
+                   onehot, 
+                   self.last_action]
+            current = jp.concatenate(cur)
 
 
-        #     # ff
-        #     ff = [a_ref[6:18], u_ref / self.tau_limit]
-        #     ff = jp.concatenate(ff)
+            # future
+            preview = self._preview_fn(self.ii, dof_pos)
 
 
-        #     # past
-        #     if self.init_history:
-        #         tau_applied = self.Kp * (self.q0 - dof_pos) - self.Kd * dof_vel
-        #         self.history = np.tile(np.concatenate((dof_pos, 
-        #                                                dof_vel, 
-        #                                                ang_vel_body, 
-        #                                                tau_applied)), (16, 1))
-        #         self.init_history = False
-
-        #     hist = self.history[::2, :].reshape(-1)
+            # ff
+            ff = [a_ref[6:18], u_ref / self.tau_limit]
+            ff = jp.concatenate(ff)
 
 
-        #     # policy inference
-        #     obs = jp.concatenate([current, preview, ff, hist])
-        #     obs = jp.clip(jp.nan_to_num(obs), -100.0, 100.0)
+            # past
+            if self.init_history:
+                tau_applied = self.tau_i + self.Kp_align * (self.q0 - dof_pos) - self.Kd_align * dof_vel
+                self.history = np.tile(np.concatenate((dof_pos, 
+                                                       dof_vel, 
+                                                       ang_vel_body, 
+                                                       tau_applied)), (16, 1))
+                self.init_history = False
 
-        #     action, _ = self.policy(obs, self.policy_key)
-        #     action = np.clip(action, -1.0, 1.0)
-
-        #     if USE_LOGGING:
-        #         infer_ms = 1000.0 * (time.perf_counter() - t_infer_start)
-
-        #     q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
-
-        #     fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
-        #     tau_ff = np.clip(u_ref + fade * self.tau_i, -self.tau_ff_clip, self.tau_ff_clip)
-
-        #     # set joint commands
-        #     for i in range(12):
-        #         idx = self.JOINT_REORDERING[i]
-        #         self.low_cmd.motor_cmd[idx].q = float(q_des[i])
-        #         self.low_cmd.motor_cmd[idx].dq = 0
-        #         self.low_cmd.motor_cmd[idx].kp = self.Kp
-        #         self.low_cmd.motor_cmd[idx].kd = self.Kd
-        #         self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
+            hist = self.history[::2, :].reshape(-1)
 
 
-        #     # update history
-        #     tau_applied = tau_ff + self.Kp * (q_des - dof_pos) - self.Kd * dof_vel
-        #     self.history[:-1, :] = self.history[1:, :]
-        #     self.history[-1, :] = np.concatenate((dof_pos, 
-        #                                           dof_vel, 
-        #                                           ang_vel_body, 
-        #                                           tau_applied))
+            # policy inference
+            obs = jp.concatenate([current, preview, ff, hist])
+            obs = jp.clip(jp.nan_to_num(obs), -100.0, 100.0)
 
-        #     self.last_action = action.copy()
+            action, _ = self.policy(obs, self.policy_key)
+            action = np.clip(action, -1.0, 1.0)
 
-        #     if USE_LOGGING:
-        #         logging.info(
-        #             "step %3d/%d | infer %6.2f ms | ori_err %.3f | joint_err max %.3f rad",
-        #             self.ii, self.traj_length, infer_ms,
-        #             np.linalg.norm(np.asarray(ori_err)),
-        #             np.max(np.abs(np.asarray(joint_err))))
+            if USE_LOGGING:
+                infer_ms = 1000.0 * (time.perf_counter() - t_infer_start)
+
+            q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
+
+            fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
+            tau_ff = np.clip(u_ref + fade * self.tau_i, -self.tau_ff_clip, self.tau_ff_clip)
+
+            # set joint commands
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(q_des[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp
+                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
+
+
+            # update history
+            tau_applied = tau_ff + self.Kp * (q_des - dof_pos) - self.Kd * dof_vel
+            self.history[:-1, :] = self.history[1:, :]
+            self.history[-1, :] = np.concatenate((dof_pos, 
+                                                  dof_vel, 
+                                                  ang_vel_body, 
+                                                  tau_applied))
+
+            self.last_action = action.copy()
+
+            if USE_LOGGING:
+                logging.info(
+                    "step %3d/%d | infer %6.2f ms | ori_err %.3f | joint_err max %.3f rad",
+                    self.ii, self.traj_length, infer_ms,
+                    np.linalg.norm(np.asarray(ori_err)),
+                    np.max(np.abs(np.asarray(joint_err))))
                 
-        #         self.q_log[self.ii, 0:3] = Rotation.from_quat(np.asarray(base_quat), scalar_first=True).as_euler("XYZ")
-        #         self.q_log[self.ii, 3:15] = dof_pos
+                self.q_log[self.ii, 0:3] = Rotation.from_quat(np.asarray(base_quat), scalar_first=True).as_euler("XYZ")
+                self.q_log[self.ii, 3:15] = dof_pos
 
-        #     self.ii += 1
+            self.ii += 1
 
         else:
 
