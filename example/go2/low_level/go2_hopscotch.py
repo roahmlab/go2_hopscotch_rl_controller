@@ -132,6 +132,8 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
+        self.gyro_alpha = 0.5
+        self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
@@ -299,7 +301,11 @@ class Custom:
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
-            ang_vel_body = np.array(self.low_state.imu_state.gyroscope)
+            gyro_raw = np.array(self.low_state.imu_state.gyroscope)
+            if self.gyro_f is None:
+                self.gyro_f = gyro_raw
+            self.gyro_f = self.gyro_f + self.gyro_alpha * (gyro_raw - self.gyro_f)
+            ang_vel_body = self.gyro_f
 
             x = np.zeros(37)
             x[3:7] = base_quat
