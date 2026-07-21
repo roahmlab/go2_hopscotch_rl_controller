@@ -79,7 +79,7 @@ class Custom:
             time.sleep(1)
 
     def Start(self):
-        self.lowCmdWriteThreadPtr = RecurrentThread(
+        self.lowCmdWriteThreadPtr =     Thread(
             interval=0.002, target=self.LowCmdWrite, name="writebasiccmd"
         )
         self.lowCmdWriteThreadPtr.Start()
