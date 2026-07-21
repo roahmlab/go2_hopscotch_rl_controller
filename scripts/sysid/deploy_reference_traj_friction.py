@@ -10,7 +10,9 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient
-
+'''
+python deploy_reference_traj_friction.py eth0 ../../data/go2/FR/reference_FR_cand0.csv
+'''
 # --- Sysid config --- #
 
 LEG_WIRE_INDEX = {"FR": 0, "FL": 3, "RR": 6, "RL": 9}
@@ -195,7 +197,8 @@ def run_sysid(csv_path="./exciting-trajectory-2.csv", iface=None):
         for k in log.keys():
             log[k] = log[k][1:-1]
             
-        out_dir = f"./"
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        out_dir = os.path.abspath(os.path.join(script_dir, "../../data/go2/FR"))
         os.makedirs(out_dir, exist_ok=True)
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         t_col = np.array(log['t']).reshape(-1, 1)
@@ -211,9 +214,25 @@ def run_sysid(csv_path="./exciting-trajectory-2.csv", iface=None):
         np.savetxt(debug_path, np.hstack([t_col, debug_cols]))
 
         print(f"Saved {len(log['t'])} samples to {traj_path} (+ debug: {debug_path})")
+        
+        tau_fb_arr = np.array(log['tau_fb'])            # (N, 3)
+        qd_ref_arr = np.array(log['qd_ref'])            # (N, 3)
+        rms_all  = np.sqrt(np.mean(tau_fb_arr ** 2, axis=0))     # per joint, all samples
+        moving   = np.abs(qd_ref_arr) >= 0.05           # mask near-zero-vel (ramp/reversals)
+        rms_move = np.sqrt(np.array(
+           [np.mean(tau_fb_arr[moving[:, j], j] ** 2) for j in range(3)]))
+        print(f"[score] RMS|tau_fb| per joint (all)    = {rms_all}")
+        print(f"[score] RMS|tau_fb| per joint (moving) = {rms_move}   <- rank on this")
+        summary_path = f"{out_dir}/friction_candidate_scores.csv"
+        with open(summary_path, 'a') as f:
+           f.write(f"{timestamp} {os.path.basename(csv_path)} "
+                   f"{rms_move[0]:.6f} {rms_move[1]:.6f} {rms_move[2]:.6f} "
+                   f"{np.linalg.norm(rms_move):.6f}\n")
+           print(f"[score] appended to {summary_path}")
 
 if __name__ == '__main__':
 
     print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
     iface = sys.argv[1] if len(sys.argv) > 1 else None
-    run_sysid(iface=iface)
+    csv_path = sys.argv[2] if len(sys.argv) > 2 else "./reference_FR_cand0.csv"
+    run_sysid(csv_path=csv_path, iface=iface)
