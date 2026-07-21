@@ -77,6 +77,7 @@ class Custom:
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)    # MuJoCo order
+        self.handoff_fade_ticks = 25
 
         self.settle_duration = 50
         self.settle_percent = 0
@@ -402,6 +403,8 @@ class Custom:
 
             tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
 
+            fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
+
             # set joint commands
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
@@ -409,7 +412,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].dq = 0
                 self.low_cmd.motor_cmd[idx].kp = self.Kp
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
-                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
+                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i] + fade * self.tau_i[i])
 
 
             # update history
