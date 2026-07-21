@@ -386,9 +386,8 @@ class Custom:
 
             q_des = np.asarray(q_ref[6:18] + self.action_scale * action)
 
-            tau_ff = np.clip(u_ref, -self.tau_ff_clip, self.tau_ff_clip)
-
             fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
+            tau_ff = np.clip(u_ref + fade * self.tau_i, -self.tau_ff_clip, self.tau_ff_clip)
 
             # set joint commands
             for i in range(12):
@@ -397,7 +396,7 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].dq = 0
                 self.low_cmd.motor_cmd[idx].kp = self.Kp
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
-                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i] + fade * self.tau_i[i])
+                self.low_cmd.motor_cmd[idx].tau = float(tau_ff[i])
 
 
             # update history
@@ -452,7 +451,7 @@ class Custom:
             r, c = j // 3, j % 3
             ax = axes[r, c]
             ax.plot(t, self.q_log[:n, j], label="actual")
-            ax.plot(t, self.q_ref[:n, j], "--", label="reference")
+            ax.plot(t, self.q_ref[:n, j+3], "--", label="reference")
 
             labels = ["roll", "pitch", "yaw",
                       "FL hip", "FL thigh", "FL calf",
