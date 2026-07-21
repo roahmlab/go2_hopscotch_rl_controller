@@ -302,6 +302,8 @@ class Custom:
 
         # ---- policy-phase state ----
         self.ii = 0
+        self.start_policy = False             # armed gate: main thread's Enter releases it
+        self._armed_logged = False
         self.handoff_done = False
         self.prev_action = np.zeros(12)           # 1-step ACTION latency (training nominal)
         self.prev_measured = None                 # 1-step SENSOR latency
@@ -482,6 +484,9 @@ class Custom:
             return False
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[m].q for m in range(12)]
+            if np.abs(np.asarray(self.startPos) - self.q0_motor).max() < 0.1:
+                self.fold_percent = self.align_percent = 1
+                logging.info("already within 0.1 rad of q0 - skipping fold/align")
             self.firstRun = False
         self.motiontime += 1
 
@@ -510,8 +515,9 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = 0
 
-        elif self.hold_percent < 1:
-            # stage 3: hold q0, integrate out the static holding torque
+        elif (self.hold_percent < 1) or (not self.start_policy):
+            # stage 3: hold q0 + integrator; once calibrated, keep holding (armed)
+            # until the main thread's Enter sets start_policy
             self.hold_percent = min(self.hold_percent + 1.0 / self.hold_duration, 1)
             for m in range(12):
                 err_m = self.q0_motor[m] - self.low_state.motor_state[m].q
@@ -525,6 +531,9 @@ class Custom:
             if self.motiontime % 10 == 0:
                 q_now = np.array([self.low_state.motor_state[m].q for m in range(12)])
                 logging.info("hold max|err| %.3f", np.abs(q_now - self.q0_motor).max())
+            if self.hold_percent >= 1 and not self._armed_logged:
+                logging.info("ARMED: calibrated + holding q0 - waiting for Enter")
+                self._armed_logged = True
 
         elif self.ii < self.n_ticks:
             if not self.handoff_done:
@@ -565,11 +574,16 @@ if __name__ == '__main__':
     custom.Init()
     custom.Start()
 
+    launched = False
     while True:
         if custom.aborted:
             time.sleep(2)
-            print("Aborted (tilt) - robot in damping mode. Ctrl-C when secured.")
+            print("Aborted - robot in damping mode. Ctrl-C when secured.")
             time.sleep(10)
+        if (not launched) and (not custom.aborted) and custom.hold_percent >= 1:
+            input("Robot calibrated + holding q0. Press Enter to LAUNCH...")
+            custom.start_policy = True
+            launched = True
         if custom.settle_percent >= 1:
             time.sleep(1)
             print("Done!")
