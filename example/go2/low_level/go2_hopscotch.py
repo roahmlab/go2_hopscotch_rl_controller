@@ -365,14 +365,16 @@ class Custom:
 
             # past
             if self.init_history:
-                tau_applied = self.tau_i + self.Kp_align * (self.q0 - dof_pos) - self.Kd_align * dof_vel
+                # tau_applied_0 = self.Kp_align * (self.q0 - dof_pos) - self.Kd_align * dof_vel
+                tau_applied_0 = self.u_ref[0]
+                ang_vel_0 = self.v_ref[0, 3:6]
                 self.history = np.tile(np.concatenate((dof_pos, 
                                                        dof_vel, 
-                                                       ang_vel_body, 
-                                                       tau_applied)), (16, 1))
+                                                       np.asarray(ang_vel_0), 
+                                                       np.asarray(tau_applied_0))), (16, 1))
                 self.init_history = False
 
-            hist = self.history[::2, :].reshape(-1)
+            hist = self.history[1::2, :].reshape(-1)
 
 
             # policy inference
