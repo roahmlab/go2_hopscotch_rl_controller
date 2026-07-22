@@ -371,7 +371,7 @@ class Custom:
                 self.history = np.tile(np.concatenate((dof_pos, 
                                                        dof_vel, 
                                                        np.asarray(ang_vel_0), 
-                                                       np.asarray(tau_applied_0))), (16, 1))
+                                                       np.asarray(tau_applied_0))), (16, 1)).astype(np.float32)
                 self.init_history = False
 
             hist = self.history[1::2, :].reshape(-1)
@@ -407,7 +407,7 @@ class Custom:
             self.history[-1, :] = np.concatenate((dof_pos, 
                                                   dof_vel, 
                                                   ang_vel_body, 
-                                                  tau_applied))
+                                                  tau_applied)).astype(np.float32)
 
             self.last_action = action.copy()
 
