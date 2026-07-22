@@ -115,7 +115,7 @@ class Custom:
         self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
 
         # Load the transformer actor; checkpoint metadata selects the observation layout.
-        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind2.pkl"), 'rb') as file:
+        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind0.pkl"), 'rb') as file:
             ck = pickle.load(file)
         apj = jax.tree_util.tree_map(lambda a: jnp.asarray(a, jnp.float32), ck["actor"])
         tf = ck["tf"]
