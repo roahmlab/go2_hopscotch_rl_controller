@@ -82,7 +82,6 @@ class Custom:
 
         # thread handling
         self.lowCmdWriteThreadPtr = None
-        self.mocapThreadPtr = None
 
         self.crc = CRC()
 
