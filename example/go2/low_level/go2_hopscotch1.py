@@ -111,13 +111,19 @@ class Custom:
         self.traj_length = self.u_ref.shape[0]
         self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
 
-        # Load blind GRU actor (from residual-controller shac1, euler_v2 obs)
-        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind.pkl"), 'rb') as file:
+        # Load the GRU actor; checkpoint metadata selects the observation layout.
+        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind1.pkl"), 'rb') as file:
             ck = pickle.load(file)
         self.actor = ck["actor"]
         self.preview_offsets = tuple(int(o) for o in ck["preview"])
-        assert self.actor[0][0][0].shape[0] == 73 + 30 * len(self.preview_offsets), \
-            f"obs width {73 + 30 * len(self.preview_offsets)} != actor NF {self.actor[0][0][0].shape[0]}"
+        self.use_accelerometer = bool(np.asarray(ck.get("accelerometer", False)).item())
+        self.accelerometer_gravity = float(
+            np.asarray(ck.get("accelerometer_gravity", 9.81)).item())
+        self.accelerometer_clip_g = float(
+            np.asarray(ck.get("accelerometer_clip_g", 16.0)).item())
+        obs_width = 73 + 3 * self.use_accelerometer + 30 * len(self.preview_offsets)
+        assert self.actor[0][0][0].shape[0] == obs_width, \
+            f"obs width {obs_width} != actor NF {self.actor[0][0][0].shape[0]}"
         self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
         self.h = np.zeros(self.h_offs[-1], dtype=np.float32)
 
@@ -326,7 +332,12 @@ class Custom:
             st = np.concatenate([eul, dof_pos, ang_vel_body, dof_vel])
             rf = np.concatenate([self.eul_ref[self.ii], xr[7:19], xr[22:25], xr[25:37]])
             upd = self.u_ref[self.ii] + self.Kp * (xr[7:19] - dof_pos) + self.Kd * (xr[25:37] - dof_vel)
-            obs = [st, rf - st, upd, [self.ii / self.traj_length]]
+            obs = [st]
+            if self.use_accelerometer:
+                acceleration = np.asarray(self.low_state.imu_state.accelerometer)
+                limit = self.accelerometer_clip_g * self.accelerometer_gravity
+                obs.append(np.clip(np.nan_to_num(acceleration), -limit, limit))
+            obs.extend([rf - st, upd, [self.ii / self.traj_length]])
             for off in self.preview_offsets:
                 tp = min(self.ii + off, self.traj_length)
                 xp = self.x_ref[tp]
