@@ -29,9 +29,12 @@ is identical — see the v3 controller's header for the full contract rationale.
 DR corruptions (velest/ori_err/load noise+bias) are training-only robustness axes
 (noise_gate-scaled); the hardware supplies real noise, so clean signals here.
 
-HW calibration knobs: CONTACT_FORCE_THRESHOLD_HW (binary contacts) and
-FOOT_FORCE_TO_N (the load channel needs foot_force in ~Newtons; standing should
-read load ~ 0.25/foot. Log foot_force during the hold and set the scale).
+HW calibration knobs: FOOT_FORCE_OFFSET_RAW (per-foot in-air sensor floor; the
+sensors have large zero offsets — FL read 24 raw in flight on 2026-07-23) and
+FOOT_FORCE_LOADED_RAW (standing readings during the q0 hold). Contacts use
+hysteresis on the normalized load level (0 in air, 1 standing); the obs load
+channel maps standing to ~0.25 body weight per foot as in training. Recalibrate
+from the min-raw line printed at the end of each run + the hold log.
 """
 import time
 import sys
@@ -79,8 +82,17 @@ OBS_ACC_SCALE = 1.0 / 9.81
 ODOM_CLAMP = 0.5                                 # meta.json odom_clamp
 BODY_WEIGHT = 150.0                              # N, load-channel normalizer
 TTC_EDGE_CLIP_S = 0.3
-CONTACT_FORCE_THRESHOLD_HW = 20.0                # raw units, binary contacts. TUNABLE
-FOOT_FORCE_TO_N = 1.0                            # raw foot_force -> Newtons. CALIBRATE
+FOOT_FORCE_OFFSET_RAW = np.array([12.0, 5.0, 8.0, 12.0])    # STATIC in-air floor (robot held
+                                                            # up, 2026-07-23 hand test; NOT the
+                                                            # end-of-run min, which includes
+                                                            # inertial pad load in flight)
+FOOT_FORCE_LOADED_RAW = np.array([30.0, 31.0, 33.0, 34.0])  # standing q0 hold, 2026-07-23
+CONTACT_ON_LEVEL, CONTACT_OFF_LEVEL = 0.5, 0.25  # hysteresis on load level (0=air, 1=stand)
+FOOT_CONTACT_FROM_PLAN = np.array([True, False, False, False])
+# ^ FL pad is unusable for contact: its dynamic/loaded artifacts (creep during the
+#   hold, +11..25 raw in flight vs +2..10 on healthy feet; 2026-07-23 runs) overlap
+#   its entire contact signal. Substitute the planned schedule for its contact bit
+#   and load channel; the other three feet stay measured.
 
 MDC_VBAT, MDC_PBAT = 28.8, 1728.0
 MDC_GR, MDC_KT, MDC_R = 6.33, 0.26, 0.66
@@ -307,6 +319,8 @@ class Custom:
 
         self.ref = HopscotchRef(traj_path)
         self.policy = HendecaV18Policy(ckpt_path)
+        self.ff_min = np.full(4, np.inf)          # per-foot min RAW force during policy
+        self.contact_latch = np.ones(4)           # hysteresis state; starts standing
         self.n_ticks = int(np.ceil(self.ref.duration / self.dt))
         logging.info("ref: %d knots, %.2f s, %d jumps -> %d policy ticks",
                      self.ref.T_state, self.ref.duration, self.ref.n_jumps, self.n_ticks)
@@ -420,10 +434,18 @@ class Custom:
         qd = np.array([self.low_state.motor_state[m].dq for m in MOTOR_FROM_ISO])
         return q, qd
 
+    def _read_foot_forces_raw(self):
+        return np.array([self.low_state.foot_force[j] for j in FOOTFORCE_FROM_ISO_FOOT],
+                        dtype=float)
+
+    @staticmethod
+    def _foot_load_level(raw):
+        """Per-foot load level: 0 at the in-air sensor floor, 1 at standing."""
+        return (raw - FOOT_FORCE_OFFSET_RAW) / (FOOT_FORCE_LOADED_RAW - FOOT_FORCE_OFFSET_RAW)
+
     def _read_foot_forces_n(self):
-        raw = np.array([self.low_state.foot_force[j] for j in FOOTFORCE_FROM_ISO_FOOT],
-                       dtype=float)
-        return raw * FOOT_FORCE_TO_N
+        level = self._foot_load_level(self._read_foot_forces_raw())
+        return np.maximum(level, 0.0) * (BODY_WEIGHT / 4.0)
 
     def _aligned_quat(self):
         """IMU quat composed with the fixed z-rotation that maps the handoff yaw
@@ -454,8 +476,18 @@ class Custom:
         gyro = np.asarray(self.low_state.imu_state.gyroscope, float)
         accel = np.asarray(self.low_state.imu_state.accelerometer, float)
         measured_now = np.concatenate([gyro, accel, q, qd])
-        forces_n = self._read_foot_forces_n()
-        contacts = (forces_n > CONTACT_FORCE_THRESHOLD_HW).astype(float)
+        masks, ttc_e = self.ref.contact_pack(t)   # planned bits also feed the FL fallback
+        plan_now = masks[:4]
+        ff_raw = self._read_foot_forces_raw()
+        self.ff_min = np.minimum(self.ff_min, ff_raw)
+        level = self._foot_load_level(ff_raw)
+        self.contact_latch = np.where(level > CONTACT_ON_LEVEL, 1.0,
+                                      np.where(level < CONTACT_OFF_LEVEL, 0.0,
+                                               self.contact_latch))
+        contacts = np.where(FOOT_CONTACT_FROM_PLAN, plan_now, self.contact_latch)
+        forces_n = np.maximum(level, 0.0) * (BODY_WEIGHT / 4.0)
+        forces_n = np.where(FOOT_CONTACT_FROM_PLAN, plan_now * (BODY_WEIGHT / 4.0),
+                            forces_n)
 
         if self.held_targets is None:
             tau_applied = np.zeros(12)
@@ -493,7 +525,6 @@ class Custom:
         velest_block = np.concatenate([vhat, np.clip(e_h, -ODOM_CLAMP, ODOM_CLAMP) / ODOM_CLAMP])
 
         # v18 contact pack: planned masks + ttc-edge (deploy-exact) + measured load
-        masks, ttc_e = self.ref.contact_pack(t)
         load = np.clip(forces_n / BODY_WEIGHT, 0.0, 2.0)
         pack = np.concatenate([masks, ttc_e, load])
 
@@ -520,9 +551,11 @@ class Custom:
         self.held_targets = (q_target, qd_ref_t, tau_ff_t)
 
         if self.motiontime % 10 == 0:
-            logging.info("t %.2f cont %s vhat [%+.2f %+.2f %+.2f] eh [%+.2f %+.2f] "
-                         "yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
-                         t, contacts.astype(int), *vhat, *e_h,
+            logging.info("t %.2f cont %s plan %s ffraw %s vhat [%+.2f %+.2f %+.2f] "
+                         "eh [%+.2f %+.2f] yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
+                         t, contacts.astype(int), masks[:4].astype(int),
+                         np.round(ff_raw).astype(int),
+                         *vhat, *e_h,
                          np.degrees(yaw_e), grav_b[2], np.abs(a_cmd).max(),
                          self._loop_hz)
 
@@ -651,8 +684,8 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/model_1499_v18.pt")
-    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction.json")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/model_999_fixed.pt")
+    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
@@ -680,6 +713,11 @@ if __name__ == '__main__':
             launched = True
         if custom.settle_percent >= 1:
             time.sleep(1)
+            logging.info("min RAW foot_force during policy (FL FR RL RR): %s "
+                         "(includes inertial pad load in flight; static offsets "
+                         "%s -- recheck those with foot_force_monitor.py, robot "
+                         "held up, not from this line)", np.round(custom.ff_min, 1),
+                         FOOT_FORCE_OFFSET_RAW)
             print("Done!")
             sys.exit(0)
         time.sleep(0.5)
