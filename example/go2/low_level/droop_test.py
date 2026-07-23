@@ -1,4 +1,4 @@
-"""Single-joint torque-speed droop test: fires constant-torque bursts on one unloaded joint (robot ON ITS BACK), logs commanded vs estimated torque across speed, fits the ceiling curve tau_max(w) = a*(1 - s*w)."""
+"""Motor limit tests: default = single-joint torque-speed bursts (robot ON ITS BACK); `thrust` mode = standing crouch + escalating all-leg extension pulses probing the loaded/pack-power limit. `fit`/`thrustfit` re-analyze saved npz."""
 import sys
 import time
 import threading
@@ -21,6 +21,15 @@ CATCH_KD = 2.0
 START_POSE = np.array([0.0, 1.36, -2.65] * 4)   # MuJoCo order, calves tucked
 TAU_LIMIT = 23.7                           # abd/thigh spec stall
 OUT = "droop_test"
+# ---- thrust mode (standing, loaded) ----
+THRUST_LEVELS = (10.0, 20.0, 30.0, 40.0)   # Nm knee feedforward; thigh gets -min(lvl/2, 20)
+CROUCH = np.array([0.0, 1.25, -2.4] * 4)   # MuJoCo order
+PULSE_T = 0.2                              # s, timeout
+KNEE_STOP = -1.9                           # rad; pulse ends once knees extend this far (0.5 rad stroke)
+PULSE_KP, PULSE_KD = 15.0, 1.0             # weak posture PD during the pulse
+ALIGN_KP, ALIGN_KD = 60.0, 5.0
+TILT_ABORT = 0.5                           # rad roll/pitch -> damping
+THRUST_OUT = "thrust_test"
 # -----------------------------------------
 
 JOINT_REORDERING = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]   # MuJoCo -> firmware
@@ -71,6 +80,62 @@ def fit_and_plot(npz_path):
     fig.tight_layout()
     fig.savefig(OUT + ".png", dpi=150)
     print(f"saved {OUT}.png")
+
+
+def thrust_ff(level):
+    ff = np.zeros(12)
+    for leg in range(4):
+        ff[leg * 3 + 1] = -min(level / 2.0, 20.0)
+        ff[leg * 3 + 2] = level
+    return ff
+
+
+def fit_thrust(npz_path):
+    f = np.load(npz_path)
+    ph, trial = f["phase"], f["trial"]
+    q, dq, te = f["q"], f["dq"], f["te"]
+    volt, amp = f["volt"], np.abs(f["amp"])
+    levels, crouch = f["levels"], f["crouch"]
+    kp, kd = float(f["pulse_kp"]), float(f["pulse_kd"])
+    tc = [i for i in range(12) if i % 3]                    # thighs + calves
+    print(f"{len(ph)} samples, battery {volt.min():.1f}-{volt.max():.1f} V")
+    print("knee_ff  peakPmech  peakPelec  minV  peakA  te/demand")
+    for k in range(len(levels)):
+        m = (trial == k) & (ph == 1)
+        if not m.any():
+            continue
+        demand = thrust_ff(levels[k])[None] + kp * (crouch[None] - q[m]) - kd * dq[m]
+        pmech = np.abs(te[m] * dq[m]).sum(1).max()
+        pelec = (volt[m] * amp[m]).max()
+        big = np.abs(demand[:, tc]) > 8.0
+        ratio = np.median((te[m][:, tc] / demand[:, tc])[big]) if big.any() else np.nan
+        print(f"{levels[k]:>7.0f}  {pmech:>9.0f}  {pelec:>9.0f}  {volt[m].min():>5.1f} "
+              f"{amp[m].max():>6.1f}  {ratio:>8.2f}")
+    pulse = ph == 1
+    D, TE, LV = [], [], []
+    for k in range(len(levels)):
+        m = (trial == k) & pulse
+        if not m.any():
+            continue
+        d = thrust_ff(levels[k])[None] + kp * (crouch[None] - q[m]) - kd * dq[m]
+        D.append(d[:, tc].ravel()); TE.append(te[m][:, tc].ravel())
+        LV.append(np.full(d[:, tc].size, levels[k]))
+    D, TE, LV = map(np.concatenate, (D, TE, LV))
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+    sc = axes[0].scatter(D, TE, c=LV, s=4, cmap="viridis")
+    lim = max(np.abs(D).max(), np.abs(TE).max())
+    axes[0].plot([-lim, lim], [-lim, lim], "k--", lw=1)
+    axes[0].set_xlabel("demanded torque [Nm]"); axes[0].set_ylabel("tau_est [Nm]")
+    plt.colorbar(sc, ax=axes[0], label="knee ff level")
+    axes[1].plot(volt[pulse] * amp[pulse], ".", ms=2)
+    axes[1].axhline(1728, color="r", ls="--", label="Isaac Pbat 1728W")
+    axes[1].set_ylabel("pack power [W]"); axes[1].legend()
+    axes[2].plot(volt, ".", ms=2); axes[2].set_ylabel("pack V")
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(THRUST_OUT + ".png", dpi=150)
+    print(f"saved {THRUST_OUT}.png")
 
 
 class DroopTest:
@@ -221,10 +286,130 @@ def main():
     fit_and_plot(OUT + ".npz")
 
 
+class ThrustTest(DroopTest):
+    def __init__(self):
+        super().__init__()
+        self.trials = list(THRUST_LEVELS)
+
+    def OnLowState(self, msg):
+        self.low_state = msg
+        if self.phase in ("settle", "pulse", "catch") and self.trial >= 0:
+            ms = msg.motor_state
+            row = [time.time(), {"settle": 0, "pulse": 1, "catch": 2}[self.phase], self.trial]
+            row += [ms[JOINT_REORDERING[i]].q for i in range(12)]
+            row += [ms[JOINT_REORDERING[i]].dq for i in range(12)]
+            row += [ms[JOINT_REORDERING[i]].tau_est for i in range(12)]
+            row += [msg.power_v, msg.power_a]
+            self.log.append(row)
+
+    def tilt(self):
+        w, x, y, z = self.low_state.imu_state.quaternion
+        roll = np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+        pitch = np.arcsin(np.clip(2 * (w * y - z * x), -1.0, 1.0))
+        return max(abs(roll), abs(pitch))
+
+    def crouch_all(self, kp, kd):
+        for i in range(12):
+            self.set_joint(i, CROUCH[i], 0, kp, kd, 0)
+
+    def Step(self):
+        if self.low_state is None:
+            return
+        if self.estop.is_set():
+            for i in range(12):
+                self.set_joint(i, 0, 0, 0, 5.0, 0)
+            self.publish()
+            return
+        self.timer += 1
+        t = self.timer * DT
+        if self.phase == "align":
+            if self.align_from is None:
+                self.align_from = np.array(
+                    [self.low_state.motor_state[JOINT_REORDERING[i]].q for i in range(12)])
+            r = min(t / 3.0, 1.0)
+            tgt = (1 - r) * self.align_from + r * CROUCH
+            for i in range(12):
+                self.set_joint(i, tgt[i], 0, ALIGN_KP, ALIGN_KD, 0)
+            if r >= 1.0:
+                self.next_trial()
+        elif self.phase == "settle":
+            self.crouch_all(ALIGN_KP, ALIGN_KD)
+            if t >= 2.0:
+                self.phase, self.timer = "pulse", 0
+                print(f"pulse {self.trial + 1}/{len(self.trials)}: knee ff "
+                      f"{self.trials[self.trial]:+.0f} Nm", flush=True)
+        elif self.phase == "pulse":
+            ff = thrust_ff(self.trials[self.trial])
+            for leg in range(4):
+                self.set_joint(leg * 3, CROUCH[leg * 3], 0, ALIGN_KP, ALIGN_KD, 0)
+                for j in (1, 2):
+                    self.set_joint(leg * 3 + j, CROUCH[leg * 3 + j], 0,
+                                   PULSE_KP, PULSE_KD, ff[leg * 3 + j])
+            knees = np.mean([self.low_state.motor_state[JOINT_REORDERING[leg * 3 + 2]].q
+                             for leg in range(4)])
+            if self.tilt() > TILT_ABORT:
+                print("TILT ABORT -> damping", flush=True)
+                self.estop.set()
+            elif t > PULSE_T or knees > KNEE_STOP:
+                self.phase, self.timer = "catch", 0
+        elif self.phase == "catch":
+            self.crouch_all(ALIGN_KP, ALIGN_KD)
+            if t > 1.0:
+                self.next_trial()
+        else:                                   # hold
+            self.crouch_all(ALIGN_KP, ALIGN_KD)
+        self.publish()
+
+    def next_trial(self):
+        self.trial += 1
+        self.timer = 0
+        if self.trial >= len(self.trials):
+            self.phase = "hold"
+            self.done.set()
+        else:
+            self.phase = "settle"
+
+
+def thrust_main(iface):
+    print("WARNING: standing test in a clear flat area. Robot crouches, then fires escalating")
+    print(f"all-leg extension pulses (knee ff {THRUST_LEVELS} Nm, {PULSE_T}s) - it may briefly hop.")
+    print("Enter at any time = damping e-stop (robot sinks).")
+    input("Press Enter to start...")
+    if iface:
+        ChannelFactoryInitialize(0, iface)
+    else:
+        ChannelFactoryInitialize(0)
+    tt = ThrustTest()
+    tt.Init()
+    thread = RecurrentThread(interval=DT, target=tt.Step, name="thrust")
+    threading.Thread(target=lambda: (input(), tt.estop.set()), daemon=True).start()
+    thread.Start()
+    while not tt.done.wait(0.5):
+        if tt.estop.is_set():
+            break
+    time.sleep(0.5)
+    if tt.log:
+        log = np.array(tt.log)
+        np.savez(THRUST_OUT + ".npz", t=log[:, 0], phase=log[:, 1], trial=log[:, 2],
+                 q=log[:, 3:15], dq=log[:, 15:27], te=log[:, 27:39],
+                 volt=log[:, 39], amp=log[:, 40],
+                 levels=np.array(THRUST_LEVELS), crouch=CROUCH,
+                 pulse_kp=PULSE_KP, pulse_kd=PULSE_KD)
+        print(f"saved {THRUST_OUT}.npz ({len(log)} samples)")
+        fit_thrust(THRUST_OUT + ".npz")
+    if not tt.estop.is_set():
+        print("holding crouch - press Enter to damp")
+        tt.estop.wait()
+    time.sleep(2)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "fit":
         OUT = sys.argv[2].rsplit(".", 1)[0]
         fit_and_plot(sys.argv[2])
+        sys.exit(0)
+    if len(sys.argv) > 2 and sys.argv[1] == "thrustfit":
+        fit_thrust(sys.argv[2])
         sys.exit(0)
     from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
     from unitree_sdk2py.core.channel import ChannelSubscriber
@@ -235,4 +420,7 @@ if __name__ == "__main__":
     import unitree_legged_const as go2
     from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
     from unitree_sdk2py.go2.sport.sport_client import SportClient
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "thrust":
+        thrust_main(sys.argv[2] if len(sys.argv) > 2 else None)
+    else:
+        main()
