@@ -78,7 +78,7 @@ class Custom:
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
-        rc = json.load(open(os.path.join(base_dir, "hopscotch_utils", "new_run_config.json")))
+        rc = json.load(open(os.path.join(base_dir, "hopscotch_utils", "run_config_3.json")))
 
         # thread handling
         self.lowCmdWriteThreadPtr = None
@@ -128,7 +128,7 @@ class Custom:
         self.u_ref = self.u_ref + rc.get('config')['reftrack']['ff_damping_comp'] * self.v_ref[:, 6:18] + rc.get('config')['reftrack']['ff_armature_comp'] * self.a_ref[:, 6:18]
 
         # Load RL policy (from Cesar RL repo)
-        params_path = os.path.join(base_dir, "hopscotch_utils", "new_params_final.pkl")
+        params_path = os.path.join(base_dir, "hopscotch_utils", "params_final_3.pkl")
 
         nf_kwargs = dict(
             policy_hidden_layer_sizes=tuple(rc["policy_hidden"]),
