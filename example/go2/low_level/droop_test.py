@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 LEG = "FL"                                 # FL / FR / RL / RR
 JOINT = 1                                  # 0 abd, 1 thigh, 2 calf (thigh = widest travel)
 TAU_LEVELS = (4.0, 8.0, 12.0, 16.0, 20.0)  # Nm, each fired in both directions
-TRAVEL = (-0.9, 2.7)                       # rad, test travel (front thigh range -1.57..3.49)
+TRAVEL = (-0.9, 1.3)                       # rad; belly-up floor clearance (2.7 OK if trunk suspended)
 DQ_CAP = 24.0                              # rad/s, abort burst above this
 BURST_TIMEOUT = 0.8                        # s
 DT = 0.002
