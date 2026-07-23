@@ -356,6 +356,11 @@ class Custom:
         self.settle_duration = 50
         self.aborted = False
 
+        # measured loop-rate meter (should read ~50 Hz)
+        self._loop_hz = 0.0
+        self._rate_t0 = None
+        self._rate_n = 0
+
         self.firstRun = True
         self.lowCmdWriteThreadPtr = None
         self.crc = CRC()
@@ -516,9 +521,10 @@ class Custom:
 
         if self.motiontime % 10 == 0:
             logging.info("t %.2f cont %s vhat [%+.2f %+.2f %+.2f] eh [%+.2f %+.2f] "
-                         "yaw_e %+.1f tilt %.2f |a| %.2f",
+                         "yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
                          t, contacts.astype(int), *vhat, *e_h,
-                         np.degrees(yaw_e), grav_b[2], np.abs(a_cmd).max())
+                         np.degrees(yaw_e), grav_b[2], np.abs(a_cmd).max(),
+                         self._loop_hz)
 
         if grav_b[2] > -0.4:
             logging.error("TILT ABORT at t %.2f (grav_z %.2f) -> damping", t, grav_b[2])
@@ -559,6 +565,15 @@ class Custom:
             self.firstRun = False
         self.motiontime += 1
 
+        # measured loop rate (updated once per second)
+        now = time.perf_counter()
+        if self._rate_t0 is None:
+            self._rate_t0 = now
+        self._rate_n += 1
+        if now - self._rate_t0 >= 1.0:
+            self._loop_hz = self._rate_n / (now - self._rate_t0)
+            self._rate_t0, self._rate_n = now, 0
+
         if self.aborted:
             self._damped_stop()
 
@@ -595,13 +610,25 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kp = self.Kp_stand
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = float(self.tau_i[m])
-            if self.motiontime % 10 == 0:
+            if self.hold_percent < 1:
+                # still calibrating: report progress + real loop rate
+                if self.motiontime % 10 == 0:
+                    q_now = np.array([self.low_state.motor_state[m].q for m in range(12)])
+                    ff = self._read_foot_forces_n()
+                    logging.info("calibrating: hold max|err| %.3f foot_force(N?) %s "
+                                 "(loop %.1f Hz)",
+                                 np.abs(q_now - self.q0_motor).max(), np.round(ff, 1),
+                                 self._loop_hz)
+            elif not self._armed_logged:
+                # calibrated + armed: log once, then go quiet so the launch
+                # prompt in the main thread stays readable (was drowned in spam)
                 q_now = np.array([self.low_state.motor_state[m].q for m in range(12)])
                 ff = self._read_foot_forces_n()
-                logging.info("hold max|err| %.3f  foot_force(N?) %s",
-                             np.abs(q_now - self.q0_motor).max(), np.round(ff, 1))
-            if self.hold_percent >= 1 and not self._armed_logged:
-                logging.info("ARMED: calibrated + holding q0 - waiting for Enter")
+                logging.info("ARMED: calibrated (max|err| %.3f, foot_force(N?) %s, "
+                             "loop %.1f Hz) + holding q0 -> press Enter at the LAUNCH "
+                             "prompt to start the policy",
+                             np.abs(q_now - self.q0_motor).max(), np.round(ff, 1),
+                             self._loop_hz)
                 self._armed_logged = True
 
         elif self.ii < self.n_ticks:
