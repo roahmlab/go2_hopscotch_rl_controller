@@ -41,7 +41,7 @@ def quat2eul(q):
 class Custom:
     def __init__(self):
         self.Kp = 40.0
-        self.Kd = 10.0
+        self.Kd = 2.0
 
         # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
         self.Kp_stand = 60.0
