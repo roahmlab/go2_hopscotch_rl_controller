@@ -738,8 +738,8 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/model_1499_v18.pt")
-    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction.json")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/softarm_1499.pt")
+    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
