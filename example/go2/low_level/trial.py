@@ -1,12 +1,14 @@
 """Go2 hardware deployment of the hendeca-v18_cprev residual RL policy (velest +
 contact-preview line).
 
+
 Policy provenance: /mnt/ws-frb/users/vansht/resrl/go2_hopscotch/hendeca_v18_cprev
 (trained from the 2026-07 working tree: v13 recipe + obs_ori_err + obs_velest +
 obs_contact_prev, w_imp_tan 0.25/0.20/0.20). Verified against the CURRENT
 isaac_port sources (go2_mujoco_vec_env.py deployment mirror, vel_estimator.py,
 reference_manager_hopscotch.py) and the checkpoint tensors (actor 608-512-256-128-12
 ELU, estimator 460-256-128-3 ELU, obs_norm (1,608)).
+
 
 DIFFERENCES vs the v3 controller (go2_hopscotch_hendeca.py):
   * obs 580 -> 608: appends [ori_err 3 | velest 5 | contact pack 20] after attitude.
@@ -26,15 +28,14 @@ Everything else (46-dim frames, 1-step sensor+action latency, MDC applied-torque
 channel, PD 100/2.5 with dq=qd_ref, ISO ordering, stand-up + integrator handoff)
 is identical — see the v3 controller's header for the full contract rationale.
 
+
 DR corruptions (velest/ori_err/load noise+bias) are training-only robustness axes
 (noise_gate-scaled); the hardware supplies real noise, so clean signals here.
 
-HW calibration knobs: FOOT_FORCE_OFFSET_RAW (per-foot in-air sensor floor; the
-sensors have large zero offsets — FL read 24 raw in flight on 2026-07-23) and
-FOOT_FORCE_LOADED_RAW (standing readings during the q0 hold). Contacts use
-hysteresis on the normalized load level (0 in air, 1 standing); the obs load
-channel maps standing to ~0.25 body weight per foot as in training. Recalibrate
-from the min-raw line printed at the end of each run + the hold log.
+
+HW calibration knobs: CONTACT_FORCE_THRESHOLD_HW (binary contacts) and
+FOOT_FORCE_TO_N (the load channel needs foot_force in ~Newtons; standing should
+read load ~ 0.25/foot. Log foot_force during the hold and set the scale).
 """
 import time
 import sys
@@ -42,7 +43,9 @@ import os
 import json
 import logging
 
+
 import numpy as np
+
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -56,10 +59,12 @@ import unitree_legged_const as go2
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 
+
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
 
 # --------------------------------------------------------------------- orders
 ISO_NAMES = [f"{leg}_{part}_joint" for part in ("hip", "thigh", "calf")
@@ -67,6 +72,7 @@ ISO_NAMES = [f"{leg}_{part}_joint" for part in ("hip", "thigh", "calf")
 MOTOR_FROM_ISO = [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
 FOOTFORCE_FROM_ISO_FOOT = [1, 0, 3, 2]           # FL FR RL RR <- (FR FL RR RL)
 FOOT_NAMES = ["FL", "FR", "RL", "RR"]
+
 
 # ------------------------------------------------------- obs / control consts
 KP, KD = 100.0, 2.5
@@ -82,23 +88,17 @@ OBS_ACC_SCALE = 1.0 / 9.81
 ODOM_CLAMP = 0.5                                 # meta.json odom_clamp
 BODY_WEIGHT = 150.0                              # N, load-channel normalizer
 TTC_EDGE_CLIP_S = 0.3
-FOOT_FORCE_OFFSET_RAW = np.array([12.0, 5.0, 8.0, 12.0])    # STATIC in-air floor (robot held
-                                                            # up, 2026-07-23 hand test; NOT the
-                                                            # end-of-run min, which includes
-                                                            # inertial pad load in flight)
-FOOT_FORCE_LOADED_RAW = np.array([30.0, 31.0, 33.0, 34.0])  # standing q0 hold, 2026-07-23
-CONTACT_ON_LEVEL, CONTACT_OFF_LEVEL = 0.5, 0.25  # hysteresis on load level (0=air, 1=stand)
-FOOT_CONTACT_FROM_PLAN = np.array([True, False, False, False])
-# ^ FL pad is unusable for contact: its dynamic/loaded artifacts (creep during the
-#   hold, +11..25 raw in flight vs +2..10 on healthy feet; 2026-07-23 runs) overlap
-#   its entire contact signal. Substitute the planned schedule for its contact bit
-#   and load channel; the other three feet stay measured.
+CONTACT_FORCE_THRESHOLD_HW = 20.0                # raw units, binary contacts. TUNABLE
+FOOT_FORCE_TO_N = 1.0                            # raw foot_force -> Newtons. CALIBRATE
+
 
 MDC_VBAT, MDC_PBAT = 28.8, 1728.0
 MDC_GR, MDC_KT, MDC_R = 6.33, 0.26, 0.66
 MDC_ALPHA = MDC_R / (MDC_KT * MDC_GR)
 MDC_BETA = MDC_GR * MDC_KT
 TAU_MAX_ISO = np.array([23.7] * 8 + [45.43] * 4)
+
+
 
 
 def mdc_apply(tau_des, qd):
@@ -112,6 +112,8 @@ def mdc_apply(tau_des, qd):
     return np.clip(np.nan_to_num(tau_v), -TAU_MAX_ISO, TAU_MAX_ISO)
 
 
+
+
 # ------------------------------------------------------------ quaternion math
 def euler_xyz_to_quat_wxyz(e):
     def axis_quat(a, ax):
@@ -119,6 +121,7 @@ def euler_xyz_to_quat_wxyz(e):
         q[:, 0] = np.cos(a / 2.0)
         q[:, 1 + ax] = np.sin(a / 2.0)
         return q
+
 
     def qmul_batch(a, b):
         aw, ax, ay, az = a.T
@@ -132,6 +135,8 @@ def euler_xyz_to_quat_wxyz(e):
                       axis_quat(e[:, 2], 2))
 
 
+
+
 def qmul(a, b):
     aw, ax, ay, az = a
     bw, bx, by, bz = b
@@ -141,9 +146,13 @@ def qmul(a, b):
                      aw * bz + ax * by - ay * bx + az * bw])
 
 
+
+
 def yaw_from_quat_wxyz(q):
     w, x, y, z = q
     return np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+
+
 
 
 def rotmat_from_quat_wxyz(q):
@@ -154,8 +163,12 @@ def rotmat_from_quat_wxyz(q):
         [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
+
+
 def quat_about_z(yaw):
     return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)])
+
+
 
 
 # ------------------------------------------------- reference (FIXED loader!)
@@ -164,6 +177,7 @@ class HopscotchRef:
     the loader v18 trained against): non-final modes drop their LAST row so each
     boundary knot keeps the next mode's initial (post-impact) state. Includes the
     v18 ttc_edge precompute + contact pack."""
+
 
     def __init__(self, json_path):
         modes = json.load(open(json_path))
@@ -182,6 +196,7 @@ class HopscotchRef:
         q = np.concatenate(qs); v = np.concatenate(vs)
         u = np.concatenate(us); contact = np.concatenate(cs)
 
+
         src = [n.replace("_joint", "") for n in modes[0]["joint_names"][6:]]
         gather = [src.index(n.replace("_joint", "")) for n in ISO_NAMES]
         self.q_ref = q[:, 6:18][:, gather]
@@ -192,9 +207,11 @@ class HopscotchRef:
         self.contact = contact
         self.airborne = (~contact).all(axis=1)
 
+
         self.T_state = self.q_ref.shape[0]
         self.T_ctrl = self.tau_ff.shape[0]
         self.duration = (self.T_state - 1) * self.dt
+
 
         which = np.zeros(self.T_state, dtype=np.int64)
         i = jcount = 0
@@ -212,6 +229,7 @@ class HopscotchRef:
         self.which_jump = which
         self.n_jumps = jcount
 
+
         # v18: per-foot knots until that foot's planned contact bit next flips
         edge = np.full((self.T_state, 4), self.T_state, dtype=np.float64)
         nxt_flip = np.full(4, 2.0 * self.T_state)
@@ -221,11 +239,13 @@ class HopscotchRef:
             edge[i] = nxt_flip - i
         self.ttc_edge = edge * self.dt            # (T,4) seconds
 
+
     def _index(self, t):
         f = t / self.dt
         i0 = int(np.clip(np.floor(f), 0, self.T_state - 2))
         frac = float(np.clip(f - i0, 0.0, 1.0))
         return i0, frac
+
 
     def ref_at(self, t):
         i0, fr = self._index(t)
@@ -234,6 +254,7 @@ class HopscotchRef:
         tau = self.tau_ff[min(i0, self.T_ctrl - 1)]
         return q, qd, tau
 
+
     def preview(self, t):
         outs = []
         for j in range(NUM_FUTURE + 1):
@@ -241,12 +262,14 @@ class HopscotchRef:
             outs += [q, qd, tau]
         return np.concatenate(outs)               # 108
 
+
     def phase_info(self, t):
         i0, _ = self._index(t)
         phase = float(np.clip(t / self.duration, 0.0, 1.0))
         return np.concatenate([[phase], self.contact[i0].astype(float),
                                [float(self.airborne[i0])],
                                [self.which_jump[i0] / max(1, self.n_jumps)]])  # 7
+
 
     def contact_pack(self, t):
         """(masks 12, ttc_edge_norm 4) — plan-derived half of the v18 pack."""
@@ -257,6 +280,7 @@ class HopscotchRef:
         i0, _ = self._index(t)
         ttc_e = np.clip(self.ttc_edge[i0] / TTC_EDGE_CLIP_S, 0.0, 1.0)
         return np.concatenate(masks), ttc_e
+
 
     def base_ref_at(self, t):
         """(pos xy (2), quat wxyz (4)) — lerped like the training manager."""
@@ -269,15 +293,20 @@ class HopscotchRef:
         return pos[:2], q / max(np.linalg.norm(q), 1e-8)
 
 
+
+
 # ----------------------------------------------------------------- policy
 def _elu(x):
     return np.where(x > 0.0, x, np.expm1(np.minimum(x, 0.0)))
+
+
 
 
 class HendecaV18Policy:
     """Checkpoint -> numpy: EmpiricalNormalization + actor MLP (608->...->12) and
     the concurrent velocity-estimator head (460->256->128->3, ELU, NO normalizer —
     it consumes the O(1)-scaled raw history, mirroring vel_estimator.py)."""
+
 
     def __init__(self, ckpt_path):
         import torch
@@ -296,11 +325,13 @@ class HendecaV18Policy:
         assert self.mean.shape == (608,)
         logging.info("v18 policy loaded: %s (iter %s)", ckpt_path, ck.get("iter"))
 
+
     def estimate_vel(self, hist_scaled_460):
         x = hist_scaled_460
         for W, b in zip(self.eW[:-1], self.eb[:-1]):
             x = _elu(W @ x + b)
         return self.eW[-1] @ x + self.eb[-1]      # (3,) body-frame m/s
+
 
     def __call__(self, obs):
         x = (obs - self.mean) / (self.std + 1e-2)
@@ -309,21 +340,24 @@ class HendecaV18Policy:
         return np.clip(self.W[-1] @ x + self.b[-1], -1.0, 1.0)
 
 
+
+
 class Custom:
     def __init__(self, ckpt_path, traj_path):
         self.dt = CTRL_DT
         self.motiontime = 0
 
+
         self.low_cmd = unitree_go_msg_dds__LowCmd_()
         self.low_state = None
 
+
         self.ref = HopscotchRef(traj_path)
         self.policy = HendecaV18Policy(ckpt_path)
-        self.ff_min = np.full(4, np.inf)          # per-foot min RAW force during policy
-        self.contact_latch = np.ones(4)           # hysteresis state; starts standing
         self.n_ticks = int(np.ceil(self.ref.duration / self.dt))
         logging.info("ref: %d knots, %.2f s, %d jumps -> %d policy ticks",
                      self.ref.T_state, self.ref.duration, self.ref.n_jumps, self.n_ticks)
+
 
         # O(1) conditioning; extra 28 dims (ori_err 3 + velest 5 + pack 20) scale 1
         fs = np.ones(46)
@@ -338,6 +372,7 @@ class Custom:
                                            np.tile(pv_s, 1 + NUM_FUTURE),
                                            np.ones(7 + 5 + 3 + 5 + 20)])   # phase+att+ori+ve+pack
         assert self.actor_scale.shape == (608,), self.actor_scale.shape
+
 
         # ---- stand-up (proven recipe), Unitree MOTOR order ----
         self.Kp_stand, self.Kd_stand = 60.0, 5.0
@@ -355,6 +390,7 @@ class Custom:
         self.tau_i = np.zeros(12)
         self.handoff_fade_ticks = 25
 
+
         # ---- policy-phase state ----
         self.ii = 0
         self.start_policy = False             # armed gate: main thread's Enter releases it
@@ -370,14 +406,17 @@ class Custom:
         self.settle_duration = 50
         self.aborted = False
 
+
         # measured loop-rate meter (should read ~50 Hz)
         self._loop_hz = 0.0
         self._rate_t0 = None
         self._rate_n = 0
 
+
         self.firstRun = True
         self.lowCmdWriteThreadPtr = None
         self.crc = CRC()
+
 
     # ---------------------------------------------------------------- public
     def Init(self):
@@ -386,6 +425,7 @@ class Custom:
         self.lowcmd_publisher.Init()
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
+
 
         self.sc = SportClient()
         self.sc.SetTimeout(5.0)
@@ -400,10 +440,12 @@ class Custom:
             status, result = self.msc.CheckMode()
             time.sleep(1)
 
+
     def Start(self):
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd")
         self.lowCmdWriteThreadPtr.Start()
+
 
     # --------------------------------------------------------------- private
     def InitLowCmd(self):
@@ -419,8 +461,10 @@ class Custom:
             self.low_cmd.motor_cmd[i].kd = 0
             self.low_cmd.motor_cmd[i].tau = 0
 
+
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
+
 
     # ------------------------------------------------------------ obs pieces
     def _imu_quat(self):
@@ -429,28 +473,24 @@ class Custom:
         and the training DR modeled exactly this drift (yaw_bias 0.1 rad in flight)."""
         return np.asarray(self.low_state.imu_state.quaternion, float)
 
+
     def _read_iso(self):
         q = np.array([self.low_state.motor_state[m].q for m in MOTOR_FROM_ISO])
         qd = np.array([self.low_state.motor_state[m].dq for m in MOTOR_FROM_ISO])
         return q, qd
 
-    def _read_foot_forces_raw(self):
-        return np.array([self.low_state.foot_force[j] for j in FOOTFORCE_FROM_ISO_FOOT],
-                        dtype=float)
-
-    @staticmethod
-    def _foot_load_level(raw):
-        """Per-foot load level: 0 at the in-air sensor floor, 1 at standing."""
-        return (raw - FOOT_FORCE_OFFSET_RAW) / (FOOT_FORCE_LOADED_RAW - FOOT_FORCE_OFFSET_RAW)
 
     def _read_foot_forces_n(self):
-        level = self._foot_load_level(self._read_foot_forces_raw())
-        return np.maximum(level, 0.0) * (BODY_WEIGHT / 4.0)
+        raw = np.array([self.low_state.foot_force[j] for j in FOOTFORCE_FROM_ISO_FOOT],
+                       dtype=float)
+        return raw * FOOT_FORCE_TO_N
+
 
     def _aligned_quat(self):
         """IMU quat composed with the fixed z-rotation that maps the handoff yaw
         onto the reference world's yaw(0) — the training spawn convention."""
         return qmul(self.q_align, self._imu_quat())
+
 
     def _seed_policy_state(self):
         sensor_init = np.zeros(30)
@@ -470,24 +510,16 @@ class Custom:
         logging.info("HANDOFF: v18 policy takes over (yaw align %+.1f deg)",
                      np.degrees(d_yaw))
 
+
     def _policy_tick(self):
         t = self.ii * self.dt
         q, qd = self._read_iso()
         gyro = np.asarray(self.low_state.imu_state.gyroscope, float)
         accel = np.asarray(self.low_state.imu_state.accelerometer, float)
         measured_now = np.concatenate([gyro, accel, q, qd])
-        masks, ttc_e = self.ref.contact_pack(t)   # planned bits also feed the FL fallback
-        plan_now = masks[:4]
-        ff_raw = self._read_foot_forces_raw()
-        self.ff_min = np.minimum(self.ff_min, ff_raw)
-        level = self._foot_load_level(ff_raw)
-        self.contact_latch = np.where(level > CONTACT_ON_LEVEL, 1.0,
-                                      np.where(level < CONTACT_OFF_LEVEL, 0.0,
-                                               self.contact_latch))
-        contacts = np.where(FOOT_CONTACT_FROM_PLAN, plan_now, self.contact_latch)
-        forces_n = np.maximum(level, 0.0) * (BODY_WEIGHT / 4.0)
-        forces_n = np.where(FOOT_CONTACT_FROM_PLAN, plan_now * (BODY_WEIGHT / 4.0),
-                            forces_n)
+        forces_n = self._read_foot_forces_n()
+        contacts = (forces_n > CONTACT_FORCE_THRESHOLD_HW).astype(float)
+
 
         if self.held_targets is None:
             tau_applied = np.zeros(12)
@@ -495,10 +527,12 @@ class Custom:
             qt, qdt, tff = self.held_targets
             tau_applied = mdc_apply(KP * (qt - q) + KD * (qdt - qd) + tff, qd)
 
+
         frame = np.concatenate([self.prev_measured, contacts, tau_applied])
         self.prev_measured = measured_now
         self.history = np.roll(self.history, -1, axis=0)
         self.history[-1] = frame
+
 
         quat = self._aligned_quat()               # body -> ref-world
         R = rotmat_from_quat_wxyz(quat)
@@ -508,10 +542,12 @@ class Custom:
         yaw_e = yaw - yaw_from_quat_wxyz(quat_ref)
         attitude = np.concatenate([grav_b, [np.sin(yaw_e)], [np.cos(yaw_e)]])
 
+
         # ori_err rotvec: 2*sign(w)*vec(conj(q) x q_ref)  (mirror of the env)
         qc = quat * np.array([1.0, -1.0, -1.0, -1.0])
         qe = qmul(qc, quat_ref)
         ori_err = 2.0 * np.sign(qe[0] if qe[0] != 0 else 1.0) * qe[1:4]
+
 
         # velest: head on the O(1)-scaled history (PRE-normalizer), then odometry.
         # No integration on the handoff tick (mirror of the reset-obs gate).
@@ -524,9 +560,12 @@ class Custom:
         e_h = np.array([cy * e_w[0] + sy * e_w[1], -sy * e_w[0] + cy * e_w[1]])
         velest_block = np.concatenate([vhat, np.clip(e_h, -ODOM_CLAMP, ODOM_CLAMP) / ODOM_CLAMP])
 
+
         # v18 contact pack: planned masks + ttc-edge (deploy-exact) + measured load
+        masks, ttc_e = self.ref.contact_pack(t)
         load = np.clip(forces_n / BODY_WEIGHT, 0.0, 2.0)
         pack = np.concatenate([masks, ttc_e, load])
+
 
         obs = np.concatenate([self.history.reshape(-1), self.ref.preview(t),
                               self.ref.phase_info(t), attitude, ori_err,
@@ -535,10 +574,12 @@ class Custom:
         obs = np.clip(obs * self.actor_scale, -CLIP_OBS, CLIP_OBS)
         action = self.policy(obs)
 
+
         a_cmd = self.prev_action                  # 1-step act latency (training nominal)
         self.prev_action = action
         q_ref_t, qd_ref_t, tau_ff_t = self.ref.ref_at(t)
         q_target = q_ref_t + ACTION_SCALE * a_cmd
+
 
         fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
         for i in range(12):
@@ -550,19 +591,20 @@ class Custom:
             self.low_cmd.motor_cmd[m].tau = float(tau_ff_t[i] + fade * self.tau_i[m])
         self.held_targets = (q_target, qd_ref_t, tau_ff_t)
 
+
         if self.motiontime % 10 == 0:
-            logging.info("t %.2f cont %s plan %s ffraw %s vhat [%+.2f %+.2f %+.2f] "
-                         "eh [%+.2f %+.2f] yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
-                         t, contacts.astype(int), masks[:4].astype(int),
-                         np.round(ff_raw).astype(int),
-                         *vhat, *e_h,
+            logging.info("t %.2f cont %s vhat [%+.2f %+.2f %+.2f] eh [%+.2f %+.2f] "
+                         "yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
+                         t, contacts.astype(int), *vhat, *e_h,
                          np.degrees(yaw_e), grav_b[2], np.abs(a_cmd).max(),
                          self._loop_hz)
+
 
         if grav_b[2] > -0.4:
             logging.error("TILT ABORT at t %.2f (grav_z %.2f) -> damping", t, grav_b[2])
             self.aborted = True
         self.ii += 1
+
 
     def _damped_stop(self):
         for m in range(12):
@@ -571,6 +613,7 @@ class Custom:
             self.low_cmd.motor_cmd[m].kp = 0.0
             self.low_cmd.motor_cmd[m].kd = 3.0
             self.low_cmd.motor_cmd[m].tau = 0.0
+
 
     # ------------------------------------------------------------- main tick
     def LowCmdWrite(self):
@@ -587,6 +630,7 @@ class Custom:
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
         self.lowcmd_publisher.Write(self.low_cmd)
 
+
     def _tick(self):
         if self.low_state is None:
             return False
@@ -598,6 +642,7 @@ class Custom:
             self.firstRun = False
         self.motiontime += 1
 
+
         # measured loop rate (updated once per second)
         now = time.perf_counter()
         if self._rate_t0 is None:
@@ -607,8 +652,10 @@ class Custom:
             self._loop_hz = self._rate_n / (now - self._rate_t0)
             self._rate_t0, self._rate_n = now, 0
 
+
         if self.aborted:
             self._damped_stop()
+
 
         elif self.fold_percent < 1:
             self.fold_percent = min(self.fold_percent + 1.0 / self.fold_duration, 1)
@@ -620,6 +667,7 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = 0
 
+
         elif self.align_percent < 1:
             self.align_percent = min(self.align_percent + 1.0 / self.align_duration, 1)
             for m in range(12):
@@ -629,6 +677,7 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kp = self.Kp_stand
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = 0
+
 
         elif (self.hold_percent < 1) or (not self.start_policy):
             # stage 3: hold q0 + integrator; once calibrated, keep holding (armed)
@@ -664,10 +713,12 @@ class Custom:
                              self._loop_hz)
                 self._armed_logged = True
 
+
         elif self.ii < self.n_ticks:
             if not self.handoff_done:
                 self._seed_policy_state()
             self._policy_tick()
+
 
         elif self.settle_percent < 1:
             self.settle_percent = min(self.settle_percent + 1.0 / self.settle_duration, 1)
@@ -678,28 +729,35 @@ class Custom:
                 self.low_cmd.motor_cmd[m].kd = self.Kd_stand
                 self.low_cmd.motor_cmd[m].tau = 0
 
+
         return True
+
+
 
 
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/model_1499_latest.pt")
-    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/model_1499_v18.pt")
+    ap.add_argument("--traj", default="hopscotch_utils/traj_hopscotch_friction.json")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
+
     print("WARNING: Please ensure there are no obstacles around the robot while running.")
     input("Press Enter to continue...")
+
 
     if args.iface:
         ChannelFactoryInitialize(0, args.iface)
     else:
         ChannelFactoryInitialize(0)
 
+
     custom = Custom(args.checkpoint, args.traj)
     custom.Init()
     custom.Start()
+
 
     launched = False
     while True:
@@ -713,11 +771,9 @@ if __name__ == '__main__':
             launched = True
         if custom.settle_percent >= 1:
             time.sleep(1)
-            logging.info("min RAW foot_force during policy (FL FR RL RR): %s "
-                         "(includes inertial pad load in flight; static offsets "
-                         "%s -- recheck those with foot_force_monitor.py, robot "
-                         "held up, not from this line)", np.round(custom.ff_min, 1),
-                         FOOT_FORCE_OFFSET_RAW)
             print("Done!")
             sys.exit(0)
         time.sleep(0.5)
+
+
+
