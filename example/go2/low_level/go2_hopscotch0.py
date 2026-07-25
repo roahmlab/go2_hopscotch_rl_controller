@@ -113,6 +113,9 @@ class Custom:
         self.u_ref = np.asarray(u_ref, dtype=np.float64)
         self.traj_length = self.u_ref.shape[0]
         self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
+        self.ref_feat = np.concatenate(
+            [self.eul_ref, self.x_ref[:, 7:19], self.x_ref[:, 22:25], self.x_ref[:, 25:37]],
+            axis=1)
 
         # Load the transformer actor; checkpoint metadata selects the observation layout.
         with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind0.pkl"), 'rb') as file:
@@ -127,7 +130,7 @@ class Custom:
         dh = D // HD
         self.k_obs = K
         self.nf = ck["actor"][0].shape[0]
-        self.buf = None
+        self.emb = None
         self.preview_offsets = tuple(int(o) for o in ck["preview"])
         self.use_accelerometer = bool(np.asarray(ck.get("accelerometer", False)).item())
         self.accelerometer_gravity = float(
@@ -140,9 +143,13 @@ class Custom:
         def ln(z, gm, bt):
             return (z - z.mean(-1, keepdims=True)) / jnp.sqrt(z.var(-1, keepdims=True) + 1e-6) * gm + bt
 
-        def tf_apply(buf):
+        def emb_init(obs):
+            return jnp.tile((obs @ apj[0])[None], (K, 1))
+
+        def policy_step(emb, obs):
             we, be, pos, blocks, (gf, bf), (wh, bh) = apj
-            x = buf @ we + be + pos
+            emb = jnp.concatenate([emb[1:], (obs @ we)[None]], 0)
+            x = emb + be + pos
             for (g1, b1, wq, bq, wk, bk, wv, bv, wu, bu, g2, b2, w1, c1, w2, c2) in blocks:
                 y = ln(x, g1, b1)
                 q = (y @ wq + bq).reshape(K, HD, dh)
@@ -153,14 +160,17 @@ class Custom:
                 y = ln(x, g2, b2)
                 x = x + jax.nn.gelu(y @ w1 + c1) @ w2 + c2
             x = ln(x, gf, bf)
-            return x[-1] @ wh + bh
+            return emb, x[-1] @ wh + bh
 
-        self.policy_fn = jax.jit(tf_apply)
+        self.emb_init = jax.jit(emb_init)
+        self.policy_fn = jax.jit(policy_step, donate_argnums=0)
 
         # warm up (compile) the jitted transformer so the first tick doesn't stall
         print("compiling transformer ...", flush=True)
         t0 = time.perf_counter()
-        self.policy_fn(jnp.zeros((K, self.nf), jnp.float32)).block_until_ready()
+        emb0 = self.emb_init(jnp.zeros(self.nf, jnp.float32))
+        emb0, v0 = self.policy_fn(emb0, jnp.zeros(self.nf, jnp.float32))
+        v0.block_until_ready()
         print(f"compiled in {time.perf_counter() - t0:.1f}s", flush=True)
 
         # Get q0 and qf
@@ -360,7 +370,7 @@ class Custom:
             eul = quat2eul(base_quat)
             xr = self.x_ref[self.ii]
             st = np.concatenate([eul, dof_pos, ang_vel_body, dof_vel])
-            rf = np.concatenate([self.eul_ref[self.ii], xr[7:19], xr[22:25], xr[25:37]])
+            rf = self.ref_feat[self.ii]
             upd = self.u_ref[self.ii] + self.Kp * (xr[7:19] - dof_pos) + self.Kd * (xr[25:37] - dof_vel)
             obs = [st]
             if self.use_accelerometer:
@@ -370,16 +380,15 @@ class Custom:
             obs.extend([rf - st, upd, [self.ii / self.traj_length]])
             for off in self.preview_offsets:
                 tp = min(self.ii + off, self.traj_length)
-                xp = self.x_ref[tp]
-                obs.append(np.concatenate([self.eul_ref[tp], xp[7:19], xp[22:25], xp[25:37]]))
+                obs.append(self.ref_feat[tp])
             obs = np.clip(np.nan_to_num(np.concatenate(obs)), -1e4, 1e4).astype(np.float32)
 
-            # policy inference (jitted transformer over a rolling obs buffer)
-            if self.buf is None:
-                self.buf = np.tile(obs, (self.k_obs, 1))
-            else:
-                self.buf = np.concatenate([self.buf[1:], obs[None]], 0)
-            v = np.asarray(self.policy_fn(jnp.asarray(self.buf)))
+            # policy inference (rolling embed cache kept device-side, one fused jit call)
+            obs_j = jnp.asarray(obs)
+            if self.emb is None:
+                self.emb = self.emb_init(obs_j)
+            self.emb, v = self.policy_fn(self.emb, obs_j)
+            v = np.asarray(v)
 
             tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
             if not np.isfinite(tau).all():
