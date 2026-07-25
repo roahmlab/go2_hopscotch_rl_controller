@@ -143,7 +143,7 @@ class Custom:
         def tf_apply(buf):
             we, be, pos, blocks, (gf, bf), (wh, bh) = apj
             x = buf @ we + be + pos
-            for (g1, b1, wq, bq, wk, bk, wv, bv, wu, bu, g2, b2, w1, c1, w2, c2) in blocks:
+            for (g1, b1, wq, bq, wk, bk, wv, bv, wu, bu, g2, b2, w1, c1, w2, c2) in blocks[:-1]:
                 y = ln(x, g1, b1)
                 q = (y @ wq + bq).reshape(K, HD, dh)
                 kk = (y @ wk + bk).reshape(K, HD, dh)
@@ -152,8 +152,17 @@ class Custom:
                 x = x + jnp.einsum("hqk,khd->qhd", at, vv).reshape(K, D) @ wu + bu
                 y = ln(x, g2, b2)
                 x = x + jax.nn.gelu(y @ w1 + c1) @ w2 + c2
+            g1, b1, wq, bq, wk, bk, wv, bv, wu, bu, g2, b2, w1, c1, w2, c2 = blocks[-1]
+            y = ln(x, g1, b1)
+            q = (y[-1:] @ wq + bq).reshape(1, HD, dh)
+            kk = (y @ wk + bk).reshape(K, HD, dh)
+            vv = (y @ wv + bv).reshape(K, HD, dh)
+            at = jax.nn.softmax(jnp.einsum("qhd,khd->hqk", q, kk) / jnp.sqrt(dh), axis=-1)
+            x = x[-1:] + jnp.einsum("hqk,khd->qhd", at, vv).reshape(1, D) @ wu + bu
+            y = ln(x, g2, b2)
+            x = x + jax.nn.gelu(y @ w1 + c1) @ w2 + c2
             x = ln(x, gf, bf)
-            return x[-1] @ wh + bh
+            return x[0] @ wh + bh
 
         self.policy_fn = jax.jit(tf_apply)
 
