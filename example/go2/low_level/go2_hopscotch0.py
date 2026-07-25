@@ -44,8 +44,8 @@ def quat2eul(q):
 
 class Custom:
     def __init__(self):
-        self.Kp = 40.0
-        self.Kd = 10.0
+        self.Kp = 60.0
+        self.Kd = 2.0
 
         # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
         self.Kp_stand = 60.0
@@ -118,8 +118,12 @@ class Custom:
         with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind0.pkl"), 'rb') as file:
             ck = pickle.load(file)
         apj = jax.tree_util.tree_map(lambda a: jnp.asarray(a, jnp.float32), ck["actor"])
+        self.Kp = float(np.asarray(ck.get("kp", self.Kp)).item())
+        self.Kd = float(np.asarray(ck.get("kd", self.Kd)).item())
         tf = ck["tf"]
         K, D, HD = tf["k_obs"], tf["d"], tf["heads"]
+        print(f"actor_blind0: iter {int(np.asarray(ck['iter']))} eval {float(np.asarray(ck['eval'])):.3f} "
+              f"kp {self.Kp:g} kd {self.Kd:g} k_obs {int(K)}", flush=True)
         dh = D // HD
         self.k_obs = K
         self.nf = ck["actor"][0].shape[0]
