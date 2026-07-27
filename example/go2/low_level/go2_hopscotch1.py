@@ -75,7 +75,8 @@ class Custom:
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)
-        self.handoff_fade_ticks = 100
+        self.handoff_fade_ticks = 40
+        self.handoff_fade_gain = 0.5
 
         self.settle_duration = 400
         self.settle_percent = 0
@@ -426,7 +427,11 @@ class Custom:
 
             v = self.policy(obs)
 
-            tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
+            fade = (0.0 if self.handoff_fade_ticks <= 0 else
+                    self.handoff_fade_gain
+                    * max(0.0, 1.0 - (self.ii / self.stride) / self.handoff_fade_ticks))
+            tau = np.clip(self.u_ref[self.ii] + v + fade * self.tau_i,
+                          -self.tau_limit, self.tau_limit)
             if not np.isfinite(tau).all():
                 self.fault = True
                 print("FAULT: non-finite command, entering damping mode", flush=True)
