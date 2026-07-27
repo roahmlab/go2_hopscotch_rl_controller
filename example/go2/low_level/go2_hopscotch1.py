@@ -70,7 +70,7 @@ class Custom:
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_duration = 600
+        self.hold_duration = 1000
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
@@ -204,6 +204,14 @@ class Custom:
         self.policy_fn(jnp.zeros((K, self.nf), jnp.float32)).block_until_ready()
         print(f"compiled in {time.perf_counter() - t0:.1f}s", flush=True)
 
+    def warm_policy(self):
+        """Runs a throwaway actor tick during stand-up so clocks and caches are hot at the handoff."""
+        self.policy(np.zeros(self.nf, dtype=np.float32))
+        if self.arch == "gru":
+            self.h[:] = 0.0
+        else:
+            self.buf = None
+
     def policy(self, obs):
         """Runs one actor tick: numpy GRU state update, or the jitted transformer over a rolling buffer."""
         if self.arch == "gru":
@@ -308,6 +316,9 @@ class Custom:
                 self.low_cmd.crc = self.crc.Crc(self.low_cmd)
                 self.lowcmd_publisher.Write(self.low_cmd)
             return
+
+        if self.hold_percent < 1:
+            self.warm_policy()
 
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]

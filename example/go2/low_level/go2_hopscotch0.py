@@ -154,7 +154,7 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
-        self.gyro_alpha = 0.5
+        self.gyro_alpha = 1.0
         self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
@@ -203,6 +203,14 @@ class Custom:
         t0 = time.perf_counter()
         self.policy_fn(jnp.zeros((K, self.nf), jnp.float32)).block_until_ready()
         print(f"compiled in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    def warm_policy(self):
+        """Runs a throwaway actor tick during stand-up so clocks and caches are hot at the handoff."""
+        self.policy(np.zeros(self.nf, dtype=np.float32))
+        if self.arch == "gru":
+            self.h[:] = 0.0
+        else:
+            self.buf = None
 
     def policy(self, obs):
         """Runs one actor tick: numpy GRU state update, or the jitted transformer over a rolling buffer."""
@@ -308,6 +316,9 @@ class Custom:
                 self.low_cmd.crc = self.crc.Crc(self.low_cmd)
                 self.lowcmd_publisher.Write(self.low_cmd)
             return
+
+        if self.hold_percent < 1:
+            self.warm_policy()
 
         if self.firstRun:
             self.startPos = [self.low_state.motor_state[i].q for i in self.JOINT_REORDERING]
