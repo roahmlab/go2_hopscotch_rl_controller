@@ -111,3 +111,15 @@ Replace `enp2s0` with the name of the network interface to which the robot is co
 python3 ./example/vui_client/vui_client_example.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected.T he robot will cycle the volume and light brightness. The interface is detailed at https://support.unitree.com/home/en/developer/VuiClient
+
+## System identification
+
+### Prerequisites
+- Connect an ethernet cable between your source laptop and the robot. 
+- Start the robot and set the obstacle detection to off (command in the controller help sheet)
+- Turn the lidar rotating cover off. Go to `go2_hopscotch_rl_controller/example/go2/high_level/` and run `python3 go2_utlidar_switch.py` and press Enter when prompted.
+- Place the robot to damping position (command in the controller) and place the robot at the edge of the table, ensuring full range of motion for the legs on the edge.
+- Run `ifconfig` in a terminal in the source laptop and write down the network interface for the robot. To find which one, disconnect the cable, run `ifconfig`, see the result and connect the cable, run `ifconfig` and note the difference in output to find the interface name. 
+
+### Deploying a friction reference trajectory
+- Run `python deploy_reference_traj_friction.py eth0 ../../data/go2/FR/reference_FR_cand0.csv` where eth0 is the network interface name and csv file location is file to load. Press enter when prompted, the script executes to move to the starting position and then starts recording. 
