@@ -17,10 +17,6 @@ from unitree_sdk2py.go2.sport.sport_client import SportClient
 
 import numpy as np
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
-import jax
-import jax.numpy as jnp
-
 
 def quat_mul(a, b):
     w1, x1, y1, z1 = a
@@ -45,7 +41,7 @@ def quat2eul(q):
 class Custom:
     def __init__(self):
         self.Kp = 40.0
-        self.Kd = 10.0
+        self.Kd = 2.0
 
         # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
         self.Kp_stand = 60.0
@@ -55,10 +51,12 @@ class Custom:
         self.stride = 5
         self.traj_end = 3400
 
+
         self.ii = 0
 
         self.low_cmd = unitree_go_msg_dds__LowCmd_()
         self.low_state = None
+        self.publish = True
 
         self.startPos = [0.0] * 12
 
@@ -113,17 +111,18 @@ class Custom:
         self.u_ref = np.asarray(u_ref, dtype=np.float64)
         self.traj_length = self.u_ref.shape[0]
         self.eul_ref = np.stack([quat2eul(self.x_ref[i, 3:7]) for i in range(len(self.x_ref))])
+        self.ref_feat = np.concatenate(
+            [self.eul_ref, self.x_ref[:, 7:19], self.x_ref[:, 22:25], self.x_ref[:, 25:37]],
+            axis=1)
 
-        # Load the transformer actor; checkpoint metadata selects the observation layout.
-        with open(os.path.join(base_dir, "hopscotch_utils", "actor_blind2.pkl"), 'rb') as file:
+        # Load the actor; checkpoint metadata selects architecture, gains and observation layout.
+        self.blind = "actor_blind2.pkl"
+        with open(os.path.join(base_dir, "hopscotch_utils", self.blind), 'rb') as file:
             ck = pickle.load(file)
-        apj = jax.tree_util.tree_map(lambda a: jnp.asarray(a, jnp.float32), ck["actor"])
-        tf = ck["tf"]
-        K, D, HD = tf["k_obs"], tf["d"], tf["heads"]
-        dh = D // HD
-        self.k_obs = K
-        self.nf = ck["actor"][0].shape[0]
-        self.buf = None
+        self.actor = ck["actor"]
+        self.arch = str(np.asarray(ck.get("arch", "gru")))
+        self.Kp = float(np.asarray(ck.get("kp", ck.get("pd_kp", self.Kp))))
+        self.Kd = float(np.asarray(ck.get("kd", ck.get("pd_kd", self.Kd))))
         self.preview_offsets = tuple(int(o) for o in ck["preview"])
         self.use_accelerometer = bool(np.asarray(ck.get("accelerometer", False)).item())
         self.accelerometer_gravity = float(
@@ -131,7 +130,55 @@ class Custom:
         self.accelerometer_clip_g = float(
             np.asarray(ck.get("accelerometer_clip_g", 16.0)).item())
         obs_width = 73 + 3 * self.use_accelerometer + 30 * len(self.preview_offsets)
+        if self.arch == "gru":
+            self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
+            self.h = np.zeros(self.h_offs[-1], dtype=np.float32)
+            self.nf = self.actor[0][0][0].shape[0]
+            self.policy(np.zeros(self.nf, dtype=np.float32))
+            self.h[:] = 0.0
+        else:
+            self.setup_transformer(ck)
         assert self.nf == obs_width, f"obs width {obs_width} != actor NF {self.nf}"
+        sizes = ([int(np.asarray(s)) for s in ck["gru_sizes"]] if self.arch == "gru"
+                 else [int(np.asarray(ck["tf"]["d"])), int(np.asarray(ck["tf"]["k_obs"]))])
+        print(f"{self.blind}: arch {self.arch} {sizes} iter {ck.get('iter')} "
+              f"kp {self.Kp:g} kd {self.Kd:g} preview {self.preview_offsets}", flush=True)
+
+        # Get q0 and qf
+        self.q0 = self.x_ref[0][7:19]
+        self.qf = self.x_ref[self.traj_end][7:19]
+
+        # Record initial orientation offset
+        self.firstRun = True
+        self.record_odom = True
+        self.q_off = None
+        self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        self.fault = False
+        self.gyro_alpha = 0.5
+        self.gyro_f = None
+
+        self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
+
+        # MuJoCo: [FL, FR, RL, RR]
+        # Unitree Go2: [FR, FL, RR, RL]
+        self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
+
+
+    def setup_transformer(self, ck):
+        """Builds the jitted transformer forward; jax is imported only for transformer checkpoints."""
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
+        import jax
+        import jax.numpy as jnp
+        apj = jax.tree_util.tree_map(lambda a: jnp.asarray(a, jnp.float32), ck["actor"])
+        tf = ck["tf"]
+        K = int(np.asarray(tf["k_obs"]))
+        D = int(np.asarray(tf["d"]))
+        HD = int(np.asarray(tf["heads"]))
+        dh = D // HD
+        self.k_obs = K
+        self.nf = ck["actor"][0].shape[0]
+        self.buf = None
+        self.jnp = jnp
 
         def ln(z, gm, bt):
             return (z - z.mean(-1, keepdims=True)) / jnp.sqrt(z.var(-1, keepdims=True) + 1e-6) * gm + bt
@@ -152,32 +199,29 @@ class Custom:
             return x[-1] @ wh + bh
 
         self.policy_fn = jax.jit(tf_apply)
-
-        # warm up (compile) the jitted transformer so the first tick doesn't stall
         print("compiling transformer ...", flush=True)
         t0 = time.perf_counter()
         self.policy_fn(jnp.zeros((K, self.nf), jnp.float32)).block_until_ready()
         print(f"compiled in {time.perf_counter() - t0:.1f}s", flush=True)
 
-        # Get q0 and qf
-        self.q0 = self.x_ref[0][7:19]
-        self.qf = self.x_ref[self.traj_end][7:19]
-
-        # Record initial orientation offset
-        self.firstRun = True
-        self.record_odom = True
-        self.q_off = None
-        self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
-        self.fault = False
-        self.gyro_alpha = 1.0
-        self.gyro_f = None
-
-        self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
-
-        # MuJoCo: [FL, FR, RL, RR]
-        # Unitree Go2: [FR, FL, RR, RL]
-        self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
-
+    def policy(self, obs):
+        """Runs one actor tick: numpy GRU state update, or the jitted transformer over a rolling buffer."""
+        if self.arch == "gru":
+            o = obs
+            hs = []
+            for j, (wz, uz, bz, wr, ur, br, wh, uh, bh) in enumerate(self.actor[0]):
+                hl = self.h[self.h_offs[j]:self.h_offs[j + 1]]
+                z = 1.0 / (1.0 + np.exp(-(o @ wz + hl @ uz + bz)))
+                r = 1.0 / (1.0 + np.exp(-(o @ wr + hl @ ur + br)))
+                n = np.tanh(o @ wh + (r * hl) @ uh + bh)
+                o = (1.0 - z) * n + z * hl
+                hs.append(o)
+            self.h = np.concatenate(hs)
+            wo, bo = self.actor[1]
+            return o @ wo + bo
+        self.buf = (np.tile(obs, (self.k_obs, 1)) if self.buf is None
+                    else np.concatenate([self.buf[1:], obs[None]], 0))
+        return np.asarray(self.policy_fn(self.jnp.asarray(self.buf)))
 
     # Public methods
     def Init(self):
@@ -260,8 +304,9 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kp = 0.0
                 self.low_cmd.motor_cmd[idx].kd = 5.0
                 self.low_cmd.motor_cmd[idx].tau = 0.0
-            self.low_cmd.crc = self.crc.Crc(self.low_cmd)
-            self.lowcmd_publisher.Write(self.low_cmd)
+            if self.publish:
+                self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+                self.lowcmd_publisher.Write(self.low_cmd)
             return
 
         if self.firstRun:
@@ -356,7 +401,7 @@ class Custom:
             eul = quat2eul(base_quat)
             xr = self.x_ref[self.ii]
             st = np.concatenate([eul, dof_pos, ang_vel_body, dof_vel])
-            rf = np.concatenate([self.eul_ref[self.ii], xr[7:19], xr[22:25], xr[25:37]])
+            rf = self.ref_feat[self.ii]
             upd = self.u_ref[self.ii] + self.Kp * (xr[7:19] - dof_pos) + self.Kd * (xr[25:37] - dof_vel)
             obs = [st]
             if self.use_accelerometer:
@@ -365,17 +410,10 @@ class Custom:
                 obs.append(np.clip(np.nan_to_num(acceleration), -limit, limit))
             obs.extend([rf - st, upd, [self.ii / self.traj_length]])
             for off in self.preview_offsets:
-                tp = min(self.ii + off, self.traj_length)
-                xp = self.x_ref[tp]
-                obs.append(np.concatenate([self.eul_ref[tp], xp[7:19], xp[22:25], xp[25:37]]))
+                obs.append(self.ref_feat[min(self.ii + off, self.traj_length)])
             obs = np.clip(np.nan_to_num(np.concatenate(obs)), -1e4, 1e4).astype(np.float32)
 
-            # policy inference (jitted transformer over a rolling obs buffer)
-            if self.buf is None:
-                self.buf = np.tile(obs, (self.k_obs, 1))
-            else:
-                self.buf = np.concatenate([self.buf[1:], obs[None]], 0)
-            v = np.asarray(self.policy_fn(jnp.asarray(self.buf)))
+            v = self.policy(obs)
 
             tau = np.clip(self.u_ref[self.ii] + v, -self.tau_limit, self.tau_limit)
             if not np.isfinite(tau).all():
@@ -422,19 +460,18 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
                 self.low_cmd.motor_cmd[idx].tau = 0
 
-        self.low_cmd.crc = self.crc.Crc(self.low_cmd)
-        self.lowcmd_publisher.Write(self.low_cmd)
+        if self.publish:
+            self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+            self.lowcmd_publisher.Write(self.low_cmd)
 
 
 
 if __name__ == '__main__':
 
     if len(sys.argv) > 1 and sys.argv[1] == "bench":
-        ChannelFactoryInitialize(0)
         custom = Custom()
+        custom.publish = False
         custom.InitLowCmd()
-        custom.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
-        custom.lowcmd_publisher.Init()
         custom.low_state = unitree_go_msg_dds__LowState_()
         custom.fold_percent = 1
         custom.alignment_percent = 1
