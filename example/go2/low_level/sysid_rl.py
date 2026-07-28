@@ -230,7 +230,7 @@ class HopscotchRef:
         self.T_ctrl = self.tau_ff.shape[0]
         self.duration = (self.T_state - 1) * self.dt
 
-
+    
         which = np.zeros(self.T_state, dtype=np.int64)
         i = jcount = 0
         while i < self.T_state:

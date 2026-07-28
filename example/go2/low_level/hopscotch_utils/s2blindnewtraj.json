@@ -1,0 +1,89 @@
+{
+  "joint_names": [
+    "FL_hip_joint",
+    "FR_hip_joint",
+    "RL_hip_joint",
+    "RR_hip_joint",
+    "FL_thigh_joint",
+    "FR_thigh_joint",
+    "RL_thigh_joint",
+    "RR_thigh_joint",
+    "FL_calf_joint",
+    "FR_calf_joint",
+    "RL_calf_joint",
+    "RR_calf_joint"
+  ],
+  "compliant_feet": false,
+  "traj_path": "/home/vansht/this_time/reference_grid_1khz.npz",
+  "ff_damping_comp": [
+    0.0282,
+    0.0407,
+    0.0282
+  ],
+  "ff_armature_comp": [
+    0.0003985,
+    0.0040312,
+    0.0185485
+  ],
+  "kp": 100.0,
+  "kd": 2.5,
+  "action_scale": 0.2,
+  "hold_targets": true,
+  "use_motor_model": true,
+  "mdc": {
+    "Vbat": 28.8,
+    "Pbat": 1728.0,
+    "gr": 6.33,
+    "Kt": 0.26,
+    "Kv": 3.846153846153846,
+    "R": 0.66
+  },
+  "obs_history_len": 10,
+  "preview_steps": 5,
+  "num_future": 2,
+  "clip_obs": 10.0,
+  "priv_v2": true,
+  "obs_o1_scale": true,
+  "rsi_t0_frac": 0.0,
+  "obs_ori_err": true,
+  "obs_velest": true,
+  "odom_clamp": 0.5,
+  "obs_contact_prev": true,
+  "obs_contact_blind": true,
+  "sysid_set": "sysid2",
+  "obs_priv_base": false,
+  "w_imp_tan": [
+    0.25,
+    0.2,
+    0.2
+  ],
+  "term_contact": [
+    true,
+    10.0,
+    3,
+    0.06,
+    1.0,
+    0,
+    30.0
+  ],
+  "contact_plan_objective": {
+    "weight": 0.0,
+    "force_threshold_n": 10.0,
+    "edge_grace_s": 0.06,
+    "diag_balance_weight": 0.0,
+    "diag_balance_margin_m": 0.02,
+    "diag_balance_scale_m": 0.02,
+    "diag_balance_lookahead_s": 0.12,
+    "swing_height_weight": 0.0,
+    "swing_height_target_m": 0.06,
+    "swing_height_scale_m": 0.02
+  },
+  "terrain_noise": 0.005,
+  "sensor_dr": true,
+  "sysid_nominal": true,
+  "observation_space": 608,
+  "state_space": 661,
+  "action_space": 12,
+  "phase_scale": 0.04,
+  "phase_ema": 0.5
+}
