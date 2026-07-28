@@ -174,6 +174,26 @@ def quat_about_z(yaw):
 
 
 
+def _wrap_pi(a):
+    return (np.asarray(a) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+
+
+def quat_to_euler_xyz(q):
+    """Inverse of euler_xyz_to_quat_wxyz: recover (rx, ry, rz) with R = Rx Ry Rz.
+    MUST match the reference's convention -- the trajectory stores Euler XYZ in
+    q[:, 3:6] and base_quat is built from it with exactly that composition, so
+    measured and reference RPY are only comparable if extracted the same way."""
+    R = rotmat_from_quat_wxyz(q)
+    ry = np.arcsin(np.clip(R[0, 2], -1.0, 1.0))
+    rx = np.arctan2(-R[1, 2], R[2, 2])
+    rz = np.arctan2(-R[0, 1], R[0, 0])
+    return np.array([rx, ry, rz])
+
+
+
+
 def build_gather_map(src_joint_names, target_joint_names):
     """Indices reordering a src-ordered 12-vec into target order (q_t = q_s[gather]),
     matched on the leg+part token. NEVER resolve these positionally -- a positional
@@ -627,6 +647,16 @@ class Custom:
         self.aborted = False
 
 
+        # ---- floating-base trace (appended once per policy tick, ~170 rows) ----
+        # Plain list appends: microseconds, safe inside the 50 Hz control thread.
+        # The main thread only reads it after the policy phase has stopped writing.
+        self.trace = {k: [] for k in
+                      ("t", "rpy", "rpy_ref", "ori_err", "odom_xy", "ref_xy", "vhat",
+                       "tilt", "action", "contacts", "forces", "q", "qd", "q_target",
+                       "tau_applied")}
+        self.run_tag = os.path.splitext(os.path.basename(ckpt_path))[0]
+
+
         # measured loop-rate meter (should read ~50 Hz)
         self._loop_hz = 0.0
         self._rate_t0 = None
@@ -820,11 +850,39 @@ class Custom:
         self.held_targets = (q_target, qd_ref_t, tau_ff_t)
 
 
+        # ---- trace (floating-base tracking + everything needed to reconstruct) ----
+        # ori_err is recomputed here rather than reused: the obs block only exists
+        # when the ckpt has obs_ori_err, but the metric is worth having either way.
+        _qc = quat * np.array([1.0, -1.0, -1.0, -1.0])
+        _qe = qmul(_qc, quat_ref)
+        tr = self.trace
+        tr["t"].append(t)
+        tr["rpy"].append(quat_to_euler_xyz(quat))
+        tr["rpy_ref"].append(quat_to_euler_xyz(quat_ref))
+        tr["ori_err"].append(2.0 * np.sign(_qe[0] if _qe[0] != 0 else 1.0) * _qe[1:4])
+        tr["odom_xy"].append(self.odom_xy.copy())
+        tr["ref_xy"].append(pos_ref_xy.copy())
+        tr["vhat"].append(vhat.copy())
+        tr["tilt"].append(grav_b[2])
+        tr["action"].append(a_cmd.copy())
+        tr["contacts"].append(contacts_true.copy())
+        tr["forces"].append(forces_n.copy())
+        tr["q"].append(q.copy())
+        tr["qd"].append(qd.copy())
+        tr["q_target"].append(q_target.copy())
+        tr["tau_applied"].append(tau_applied.copy())
+
+
         if self.motiontime % 10 == 0:
+            # yaw_e kept verbatim (same quantity as every earlier run's log, and the
+            # one the actor's attitude block sees). rp_e is the NEW roll/pitch pair,
+            # from the Euler-XYZ decomposition -- a different convention to yaw_e, so
+            # never read the two as three components of one vector.
+            _rp = np.degrees(_wrap_pi(tr["rpy"][-1] - tr["rpy_ref"][-1]))[:2]
             logging.info("t %.2f cont %s%s vhat [%+.2f %+.2f %+.2f] eh [%+.2f %+.2f] "
-                         "yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
+                         "rp_e [%+.1f %+.1f] yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
                          t, contacts_true.astype(int), " (blinded)" if self.blind else "",
-                         *vhat, *e_h, np.degrees(yaw_e), grav_b[2],
+                         *vhat, *e_h, *_rp, np.degrees(yaw_e), grav_b[2],
                          np.abs(a_cmd).max(), self._loop_hz)
 
 
@@ -832,6 +890,129 @@ class Custom:
             logging.error("TILT ABORT at t %.2f (grav_z %.2f) -> damping", t, grav_b[2])
             self.aborted = True
         self.ii += 1
+
+
+    # ------------------------------------------------------- trace / reporting
+    def save_trace(self, outdir="runs"):
+        """Summary metrics + a PNG + the raw npz. Called from the MAIN thread once
+        the policy phase has stopped writing (settle done, or aborted). Safe to call
+        on a short/aborted run -- it plots whatever was captured."""
+        # Truncate to the shortest key: an abort can land between two appends in the
+        # control thread, leaving one key a row longer. Losing the partial row beats
+        # raising here and taking the whole trace with it.
+        raw = {k: v for k, v in self.trace.items() if len(v)}
+        n = min((len(v) for v in raw.values()), default=0)
+        T = {k: np.asarray(v[:n], float) for k, v in raw.items()}
+        if not T or n < 2:
+            logging.warning("no trace captured (run ended before the policy phase)")
+            return None
+        os.makedirs(outdir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        stem = os.path.join(outdir, f"{self.run_tag}_{stamp}")
+
+
+        t = T["t"]
+        rpy_e = np.degrees(_wrap_pi(T["rpy"] - T["rpy_ref"]))       # (N,3) deg
+        pos_e = T["odom_xy"] - T["ref_xy"]                          # (N,2) m
+        aborted = bool(self.aborted)
+
+
+        # ---- summary ------------------------------------------------------
+        lines = [f"run          : {self.run_tag}",
+                 f"outcome      : {'ABORTED (tilt)' if aborted else 'completed'}"
+                 f"   {len(t)}/{self.n_ticks} ticks, {t[-1]:.2f}/{self.ref.duration:.2f} s",
+                 f"contact-blind: {self.blind}",
+                 "",
+                 f"{'axis':>7}{'RMS err':>10}{'max|err|':>10}{'final':>9}"]
+        for i, nm in enumerate(("roll", "pitch", "yaw")):
+            e = rpy_e[:, i]
+            lines.append(f"{nm:>7}{np.sqrt((e**2).mean()):9.2f}°{np.abs(e).max():9.2f}°"
+                         f"{e[-1]:8.2f}°")
+        for i, nm in enumerate(("odom x", "odom y")):
+            e = pos_e[:, i]
+            lines.append(f"{nm:>7}{np.sqrt((e**2).mean()):9.3f}m{np.abs(e).max():9.3f}m"
+                         f"{e[-1]:8.3f}m")
+        lines += ["",
+                  f"worst tilt (grav_z) : {T['tilt'].max():+.3f}   (abort at > -0.40)",
+                  f"|action| mean/max   : {np.abs(T['action']).mean():.3f} / "
+                  f"{np.abs(T['action']).max():.3f}",
+                  f"action saturation   : {(np.abs(T['action']) > 0.99).mean() * 100:.1f}% of joint-ticks",
+                  f"jitter (mrad/tick)  : {np.abs(np.diff(T['action'], axis=0)).mean() * 1000 * self.ACTION_SCALE:.1f}"]
+        report = "\n".join(lines)
+        print("\n" + "=" * 62 + "\n" + report + "\n" + "=" * 62)
+        with open(stem + ".txt", "w") as f:
+            f.write(report + "\n")
+        np.savez(stem + ".npz", n_ticks=self.n_ticks, aborted=aborted,
+                 blind=self.blind, run_tag=self.run_tag, **T)
+
+
+        # ---- plot (lazy import: a headless robot may not have matplotlib) ----
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as e:                                   # noqa: BLE001
+            logging.warning("matplotlib unavailable (%s); wrote %s.npz/.txt only",
+                            type(e).__name__, stem)
+            return stem
+
+
+        # planned flight windows, for shading -- makes landings readable at a glance
+        air = self.ref.airborne
+        spans, i = [], 0
+        while i < len(air):
+            if air[i]:
+                j = i
+                while j < len(air) and air[j]:
+                    j += 1
+                spans.append((i * self.ref.dt, j * self.ref.dt))
+                i = j
+            else:
+                i += 1
+
+
+        fig, ax = plt.subplots(6, 1, figsize=(11, 15), sharex=True)
+        for a in ax:
+            for s0, s1 in spans:
+                a.axvspan(s0, s1, color="0.88", lw=0, zorder=0)
+        for i, nm in enumerate(("roll", "pitch", "yaw")):
+            ax[i].plot(t, np.degrees(T["rpy_ref"][:, i]), "--", c="0.45", lw=1.4,
+                       label="reference")
+            ax[i].plot(t, np.degrees(T["rpy"][:, i]), c="C0", lw=1.6, label="measured")
+            e = rpy_e[:, i]
+            ax[i].set_ylabel(f"{nm} [deg]")
+            ax[i].set_title(f"{nm}   RMS {np.sqrt((e**2).mean()):.2f}°   "
+                            f"max {np.abs(e).max():.2f}°", fontsize=9, loc="left")
+            ax[i].legend(fontsize=8, loc="upper left")
+        ax[3].plot(t, T["ref_xy"][:, 0], "--", c="0.45", lw=1.4, label="ref x")
+        ax[3].plot(t, T["odom_xy"][:, 0], c="C0", lw=1.6, label="odom x")
+        ax[3].plot(t, T["ref_xy"][:, 1], "--", c="0.7", lw=1.4, label="ref y")
+        ax[3].plot(t, T["odom_xy"][:, 1], c="C1", lw=1.6, label="odom y")
+        ax[3].set_ylabel("base xy [m]")
+        ax[3].set_title(f"position (velest odometry, NOT ground truth)   "
+                        f"final dx {pos_e[-1, 0]:+.3f} m  dy {pos_e[-1, 1]:+.3f} m",
+                        fontsize=9, loc="left")
+        ax[3].legend(fontsize=8, loc="upper left", ncol=2)
+        ax[4].plot(t, T["tilt"], c="C3", lw=1.5, label="grav_z")
+        ax[4].axhline(-0.4, ls=":", c="r", lw=1.2, label="abort threshold")
+        ax[4].plot(t, np.abs(T["action"]).max(1), c="C2", lw=1.2, label="|action| max")
+        ax[4].axhline(1.0, ls=":", c="0.6", lw=1.0)
+        ax[4].set_ylabel("tilt / |a|")
+        ax[4].legend(fontsize=8, loc="lower left", ncol=3)
+        for f, nm in enumerate(FOOT_NAMES):
+            ax[5].plot(t, T["forces"][:, f], lw=1.3, label=nm)
+        ax[5].axhline(CONTACT_FORCE_THRESHOLD_HW, ls=":", c="k", lw=1.2,
+                      label="contact thresh")
+        ax[5].set_ylabel("foot force [N?]")
+        ax[5].set_xlabel("t [s]  (shaded = planned flight)")
+        ax[5].legend(fontsize=8, loc="upper left", ncol=5)
+        fig.suptitle(f"{self.run_tag}   {'ABORTED' if aborted else 'completed'}   "
+                     f"blind={self.blind}", fontsize=11)
+        fig.tight_layout(rect=(0, 0, 1, 0.985))
+        fig.savefig(stem + ".png", dpi=130)
+        plt.close(fig)
+        logging.info("trace written: %s.{png,npz,txt}", stem)
+        return stem
 
 
     def _damped_stop(self):
@@ -968,6 +1149,8 @@ if __name__ == '__main__':
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
+    ap.add_argument("--out", default="runs",
+                    help="directory for the per-run trace (png/npz/txt). default: runs/")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
@@ -1002,17 +1185,33 @@ if __name__ == '__main__':
 
 
     launched = False
-    while True:
-        if custom.aborted:
-            time.sleep(2)
-            print("Aborted - robot in damping mode. Ctrl-C when secured.")
-            time.sleep(10)
-        if (not launched) and (not custom.aborted) and custom.hold_percent >= 1:
-            input("Robot calibrated + holding q0. Press Enter to LAUNCH...")
-            custom.start_policy = True
-            launched = True
-        if custom.settle_percent >= 1:
-            time.sleep(1)
-            print("Done!")
-            sys.exit(0)
-        time.sleep(0.5)
+    saved = False
+    try:
+        while True:
+            if custom.aborted:
+                if not saved:                 # save the partial run: the tail before a
+                    saved = True              # fall is the most diagnostic part of it
+                    try:
+                        custom.save_trace(args.out)
+                    except Exception:
+                        logging.exception("save_trace failed (robot is still damping)")
+                time.sleep(2)
+                print("Aborted - robot in damping mode. Ctrl-C when secured.")
+                time.sleep(10)
+            if (not launched) and (not custom.aborted) and custom.hold_percent >= 1:
+                input("Robot calibrated + holding q0. Press Enter to LAUNCH...")
+                custom.start_policy = True
+                launched = True
+            if custom.settle_percent >= 1:
+                time.sleep(1)
+                if not saved:
+                    saved = True
+                    custom.save_trace(args.out)
+                print("Done!")
+                sys.exit(0)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        # Ctrl-C after a launched run should still keep the data.
+        if launched and not saved:
+            custom.save_trace(args.out)
+        raise
