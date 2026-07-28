@@ -40,7 +40,7 @@ def quat2eul(q):
 
 class Custom:
     def __init__(self):
-        self.Kp = 40.0
+        self.Kp = 60.0
         self.Kd = 2.0
 
         # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
@@ -70,7 +70,7 @@ class Custom:
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_duration = 1000
+        self.hold_duration = 600
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
@@ -155,7 +155,7 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
-        self.gyro_alpha = 1.0
+        self.gyro_alpha = 0.5
         self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
