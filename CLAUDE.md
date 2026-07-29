@@ -4,7 +4,7 @@
 > - Act as a thinking partner and explainer. Generate code in the chatbox for copy-pasting only.
 > - Building markdown artifacts is fine. Modifying `.cpp`, `.h`, `.py`, `.m`, or any source files directly is **not**.
 > - Do not run terminal commands that execute or modify code without explicit user permission.
-> - **Coding workflow**: Claude (Sonnet) discusses the design and writes high-level logic/annotated pseudocode in the chat. The user then prompts **Haiku** to implement the actual code from Claude's spec. Claude = architect + reviewer; Haiku = implementer.
+> - **Coding workflow**: Claude (Sonnet)(usually) or Opus (if tougher discussion) discusses the design and writes high-level logic/annotated pseudocode in the chat. The user also uses Sonnet to implement the actual code from Claude's spec. Claude = architect + reviewer + implementer; Opus = architect (only in some situations)
 > You only have permission to do changes in knowledge_base.md which is our knowledge_base as we keep on working on project. 
 > When giving code changes, give code changes in format (- for lines to delete, + for lines to add) ONLY. Dont give lines which are not changed, even in diff it has been noted entire sections with changes inside in some lines come up. only show lines with changes. 
 > When giving code changes in - / + diff format, use ```diff fenced code blocks so deletions render red and additions render green.
