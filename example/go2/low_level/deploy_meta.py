@@ -230,12 +230,13 @@ class HopscotchRef:
 
     def __init__(self, path, ff_damping_comp=0.0, ff_armature_comp=0.0):
         if str(path).endswith(".npz"):
-            q, v, acc, u, contact, src_names, dt, ref_motor = self._load_npz(path)
+            q, v, acc, u, contact, force_ref, src_names, dt, ref_motor = self._load_npz(path)
             fmt = "gridded npz"
         else:
-            q, v, acc, u, contact, src_names, dt, ref_motor = self._load_json(path)
+            q, v, acc, u, contact, force_ref, src_names, dt, ref_motor = self._load_json(path)
             fmt = "modes json (half-open)"
         self.dt = dt
+        self.force_ref = force_ref                 # (T,4) planned |F| per foot, N
 
 
         gather = build_gather_map(src_names, ISO_NAMES)
@@ -331,21 +332,26 @@ class HopscotchRef:
         """Legacy list-of-modes JSON. HALF-OPEN concat: drop each non-final mode's
         terminal row so the boundary knot keeps the NEXT mode's post-impact state."""
         modes = json.load(open(path))
-        qs, vs, us, as_, cs = [], [], [], [], []
+        qs, vs, us, as_, cs, fs = [], [], [], [], [], []
         for i, m in enumerate(modes):
             q = np.asarray(m["q"], float)
             v = np.asarray(m["v"], float)
             u = np.asarray(m["u"], float)
             a = np.asarray(m["a"], float)
+            lam = np.asarray(m["lam"], float)      # (steps, 3*n_active) active feet only
             cm = np.zeros((len(q), 4), bool)
-            for foot in m["contacts"]:
-                cm[:, FOOT_NAMES.index(foot.split("_")[0])] = True
+            fm = np.zeros((len(q), 4))             # planned |F| per foot (N)
+            for ci, foot in enumerate(m["contacts"]):
+                idx = FOOT_NAMES.index(foot.split("_")[0])
+                cm[:, idx] = True
+                fm[:, idx] = np.linalg.norm(lam[:, 3 * ci:3 * ci + 3], axis=1)
             if i < len(modes) - 1:                 # HALF-OPEN: drop non-final LAST row
-                q, v, u, a, cm = q[:-1], v[:-1], u[:-1], a[:-1], cm[:-1]
+                q, v, u, a, cm, fm = q[:-1], v[:-1], u[:-1], a[:-1], cm[:-1], fm[:-1]
             qs.append(q); vs.append(v); us.append(u); as_.append(a); cs.append(cm)
+            fs.append(fm)
         src = list(modes[0]["joint_names"][6:])
         return (np.concatenate(qs), np.concatenate(vs), np.concatenate(as_),
-                np.concatenate(us), np.concatenate(cs), src,
+                np.concatenate(us), np.concatenate(cs), np.concatenate(fs), src,
                 float(modes[0]["dt"]), None)       # legacy JSON models no motor
 
 
@@ -363,9 +369,13 @@ class HopscotchRef:
         acc = np.asarray(d["a"], float)
         u = np.asarray(d["u"], float)
         cin = np.asarray(d["contact"]).astype(bool)
+        lam = np.asarray(d["lam"], float).reshape(len(q), 4, 3)
         contact = np.zeros((len(q), 4), bool)
+        force = np.zeros((len(q), 4))
         for ci, foot in enumerate(str(x) for x in d["feet"]):
-            contact[:, FOOT_NAMES.index(foot.split("_")[0])] = cin[:, ci]   # BY NAME
+            idx = FOOT_NAMES.index(foot.split("_")[0])                      # BY NAME
+            contact[:, idx] = cin[:, ci]
+            force[:, idx] = np.linalg.norm(lam[:, ci], axis=1)
         src = [str(x) for x in d["joint_names"][6:18]]
         dt = 1.0 / float(d["rate"])
         # Does the GENERATOR already model the motor? Surfaced from the file's own
@@ -380,7 +390,7 @@ class HopscotchRef:
                 ref_motor["model"] = meta["robot"]["motor_model"]
         except Exception:
             ref_motor = None
-        return q, v, acc, u, contact, src, dt, ref_motor
+        return q, v, acc, u, contact, force, src, dt, ref_motor
 
 
     # -------------------------------------------------------------- sampling
@@ -938,12 +948,56 @@ class Custom:
                   f"{np.abs(T['action']).max():.3f}",
                   f"action saturation   : {(np.abs(T['action']) > 0.99).mean() * 100:.1f}% of joint-ticks",
                   f"jitter (mrad/tick)  : {np.abs(np.diff(T['action'], axis=0)).mean() * 1000 * self.ACTION_SCALE:.1f}"]
+        # ---- contact profile: plan vs measured, per foot ---------------------
+        # Ref sampled on the policy ticks. fref is in NEWTONS (trajopt lam); measured
+        # is RAW PAD units (FOOT_FORCE_TO_N uncalibrated) -- compare TIMING and shape,
+        # not amplitude. Sim baseline (matched plants, model_400s): takeoffs +0..40 ms,
+        # touchdowns +60..140 ms late via ~3 cm apex overshoot -- the HW question is
+        # whether the same signature holds here.
+        idx = np.array([self.ref._index(tt)[0] for tt in t])
+        fref = self.ref.force_ref[idx]                              # (N,4) N
+        plan = self.ref.contact[idx]                                # (N,4) bool
+        meas = T["forces"] > CONTACT_FORCE_THRESHOLD_HW             # (N,4)
+        lines += ["", "contact timing vs plan (ms, + = late; n/a = pad never released):",
+                  f"{'event':>11}{'plan_t':>8}" + "".join(f"{nm:>7}" for nm in FOOT_NAMES)]
+        events = {}                                # plan_tick -> {foot: delay_ms|None}
+        for f in range(4):
+            p = plan[:, f].astype(int); m = meas[:, f].astype(int)
+            for k in range(1, len(p)):
+                if p[k] == p[k - 1]:
+                    continue
+                kind = "touchdown" if p[k] else "takeoff"
+                # pad-release guard (FL creep): a TD delay needs the pad OFF beforehand
+                if kind == "touchdown" and m[max(0, k - 15):k].all():
+                    events.setdefault((k, kind), {})[f] = None
+                    continue
+                want = p[k]
+                cand = [j for j in range(max(1, k - 15), min(len(m), k + 16))
+                        if m[j] == want and m[j - 1] != want]
+                delay = (min(cand, key=lambda j: abs(j - k)) - k) * 1000 * self.dt \
+                    if cand else np.nan
+                events.setdefault((k, kind), {})[f] = delay
+        for (k, kind), feet in sorted(events.items()):
+            row = f"{kind:>11}{t[k]:7.2f}s"
+            for f in range(4):
+                if f not in feet:
+                    row += f"{'-':>7}"
+                elif feet[f] is None:
+                    row += f"{'n/a':>7}"
+                elif np.isnan(feet[f]):
+                    row += f"{'?':>7}"
+                else:
+                    row += f"{feet[f]:+7.0f}"
+            lines.append(row)
+
+
         report = "\n".join(lines)
         print("\n" + "=" * 62 + "\n" + report + "\n" + "=" * 62)
         with open(stem + ".txt", "w") as f:
             f.write(report + "\n")
         np.savez(stem + ".npz", n_ticks=self.n_ticks, aborted=aborted,
-                 blind=self.blind, run_tag=self.run_tag, **T)
+                 blind=self.blind, run_tag=self.run_tag,
+                 force_ref=fref, contact_plan=plan, **T)
 
 
         # ---- plot (lazy import: a headless robot may not have matplotlib) ----
@@ -1011,7 +1065,45 @@ class Custom:
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         fig.savefig(stem + ".png", dpi=130)
         plt.close(fig)
-        logging.info("trace written: %s.{png,npz,txt}", stem)
+
+
+        # ---- contact profile PNG: per-foot measured vs plan ------------------
+        # Measured pad force (raw units, left axis) vs planned |F| (N, right axis,
+        # grey dashed) + that foot's planned-stance shading. Amplitudes live in
+        # different units until FOOT_FORCE_TO_N is calibrated -- read TIMING/shape.
+        fig, ax = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+        for f, nm in enumerate(FOOT_NAMES):
+            a = ax[f]
+            p = plan[:, f]
+            k = 0
+            while k < len(p):                     # this foot's planned stance spans
+                if p[k]:
+                    j = k
+                    while j < len(p) and p[j]:
+                        j += 1
+                    a.axvspan(t[k], t[min(j, len(t) - 1)], color="0.90", lw=0, zorder=0)
+                    k = j
+                else:
+                    k += 1
+            a.plot(t, T["forces"][:, f], c="C3", lw=1.4, label="measured (raw)")
+            a.axhline(CONTACT_FORCE_THRESHOLD_HW, ls=":", c="k", lw=1.0,
+                      label="thresh" if f == 0 else None)
+            ar = a.twinx()
+            ar.plot(t, fref[:, f], "--", c="0.35", lw=1.3, label="plan |F| (N)")
+            ar.set_ylabel("plan [N]", fontsize=8, color="0.35")
+            ar.tick_params(labelsize=7, colors="0.35")
+            a.set_ylabel(f"{nm} raw")
+            if f == 0:
+                h1, l1 = a.get_legend_handles_labels()
+                h2, l2 = ar.get_legend_handles_labels()
+                a.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper left", ncol=3)
+        ax[-1].set_xlabel("t [s]  (shaded = that foot's planned stance)")
+        fig.suptitle(f"{self.run_tag}  contact profile -- plan (N, dashed) vs "
+                     f"measured pad (raw)", fontsize=11)
+        fig.tight_layout(rect=(0, 0, 1, 0.985))
+        fig.savefig(stem + "_contact.png", dpi=130)
+        plt.close(fig)
+        logging.info("trace written: %s.{png,_contact.png,npz,txt}", stem)
         return stem
 
 
