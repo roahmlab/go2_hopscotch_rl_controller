@@ -1,0 +1,15 @@
+run          : blindunionlsq_400
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     3.46°     8.44°    1.13°
+  pitch     4.82°    13.45°   -1.84°
+    yaw     5.06°    13.44°    7.77°
+ odom x    0.031m    0.084m   0.084m
+ odom y    0.077m    0.126m  -0.107m
+
+worst tilt (grav_z) : -0.935   (abort at > -0.40)
+|action| mean/max   : 0.242 / 1.000
+action saturation   : 0.4% of joint-ticks
+jitter (mrad/tick)  : 18.7
