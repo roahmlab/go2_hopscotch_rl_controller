@@ -1,0 +1,26 @@
+run          : cshape_600
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     4.66°    11.51°    8.99°
+  pitch     5.78°    21.11°   -6.19°
+    yaw     6.02°    12.69°   -1.34°
+ odom x    0.112m    0.165m   0.164m
+ odom y    0.046m    0.106m   0.057m
+
+worst tilt (grav_z) : -0.958   (abort at > -0.40)
+|action| mean/max   : 0.298 / 1.000
+action saturation   : 2.7% of joint-ticks
+jitter (mrad/tick)  : 22.8
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.40s      ?    +60    +40    +60
+  touchdown   0.70s    n/a   +120   +100   +120
+    takeoff   1.10s      ?    +40    +40    +60
+  touchdown   1.40s    n/a      -      -   +120
+    takeoff   1.90s      ?      -      -    +80
+  touchdown   2.20s      -    +80   +140      -
+    takeoff   2.70s      -    +80    +60      -
+  touchdown   3.00s    n/a   +140    +60   +100
