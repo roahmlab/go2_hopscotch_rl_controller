@@ -11,8 +11,8 @@ from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 '''
-python deploy_reference_traj_inertial.py eth0 ../../data/go2/FR/inertia/reference_FR_urdf_20260729_1937.csv
-python deploy_reference_traj_inertial.py eth0 ../../data/go2/FR/inertia/reference_FR_identified_20260729_1937.csv
+python deploy_reference_traj_inertial.py enp0s31f6 ../../data/go2/FR/inertia/reference_FR_urdf_20260729_1937.csv
+python deploy_reference_traj_inertial.py enp0s31f6 ../../data/go2/FR/inertia/reference_FR_identified_20260729_1937.csv
 '''
 # --- Sysid config --- #
 
