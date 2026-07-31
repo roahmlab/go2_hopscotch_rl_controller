@@ -1249,7 +1249,7 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/cshape_999 .pt")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/cshape_999.pt")
     ap.add_argument("--meta", default="hopscotch_utils/cshape_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
     ap.add_argument("--resid_scale", type=float, default=1.0,
