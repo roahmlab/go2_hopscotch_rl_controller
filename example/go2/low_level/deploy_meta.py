@@ -521,9 +521,20 @@ def load_meta(ckpt_path, explicit=None):
 
 
 class Custom:
-    def __init__(self, ckpt_path, meta, traj_override=None):
+    def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0):
         self.dt = CTRL_DT
         self.motiontime = 0
+        # residual-authority attenuation (2026-07-31 sim verdict: the +3-5 cm apex /
+        # late-TD margin is authority-carried; 0.75x improved every MJ-DR tail with no
+        # downside, 0.5x = full nominal launch fix but opens the tilt tail). Applied at
+        # the q_target composition ONLY -- obs, tau_ff, PD gains, ref untouched, so the
+        # policy's inputs stay contract-exact and scaling toward 0 degrades to pure
+        # PD+FF (the vindicated zero-residual baseline).
+        self.RESID_SCALE = float(resid_scale)
+        if self.RESID_SCALE != 1.0:
+            logging.warning("RESIDUAL AUTHORITY %.2fx (trained 1.0x): effective "
+                            "action_scale %.3f rad", self.RESID_SCALE,
+                            self.RESID_SCALE * float(meta["action_scale"]))
 
 
         # ---------------- contract checks: fail here, not on the robot ----------
@@ -846,7 +857,7 @@ class Custom:
         a_cmd = self.prev_action                  # 1-step act latency (training nominal)
         self.prev_action = action
         q_ref_t, qd_ref_t, tau_ff_t = self.ref.ref_at(t)
-        q_target = q_ref_t + self.ACTION_SCALE * a_cmd
+        q_target = q_ref_t + self.ACTION_SCALE * self.RESID_SCALE * a_cmd
 
 
         fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
@@ -947,7 +958,9 @@ class Custom:
                   f"|action| mean/max   : {np.abs(T['action']).mean():.3f} / "
                   f"{np.abs(T['action']).max():.3f}",
                   f"action saturation   : {(np.abs(T['action']) > 0.99).mean() * 100:.1f}% of joint-ticks",
-                  f"jitter (mrad/tick)  : {np.abs(np.diff(T['action'], axis=0)).mean() * 1000 * self.ACTION_SCALE:.1f}"]
+                  f"resid authority     : {self.RESID_SCALE:.2f}x (effective scale "
+                  f"{self.ACTION_SCALE * self.RESID_SCALE:.3f} rad)",
+                  f"jitter (mrad/tick)  : {np.abs(np.diff(T['action'], axis=0)).mean() * 1000 * self.ACTION_SCALE * self.RESID_SCALE:.1f}"]
         # ---- contact profile: plan vs measured, per foot ---------------------
         # Ref sampled on the policy ticks. fref is in NEWTONS (trajopt lam); measured
         # is RAW PAD units (FOOT_FORCE_TO_N uncalibrated) -- compare TIMING and shape,
@@ -1239,6 +1252,12 @@ if __name__ == '__main__':
     ap.add_argument("--checkpoint", default="hopscotch_utils/cshape_999 .pt")
     ap.add_argument("--meta", default="hopscotch_utils/cshape_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
+    ap.add_argument("--resid_scale", type=float, default=1.0,
+                    help="residual authority attenuation (1.0 = trained). 0.75 = the "
+                         "2026-07-31 sim pick (every MJ-DR tail improved, partial apex/"
+                         "timing fix, ~15 mrad); 0.5 = full nominal launch fix but opens "
+                         "the tilt tail on the worst plants. Applied at q_target only; "
+                         "obs/ff/gains/ref untouched.")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
     ap.add_argument("--out", default="runs",
@@ -1254,7 +1273,7 @@ if __name__ == '__main__':
         # Construction does all the validation (contract checks, reference load, ff
         # bake, obs layout, checkpoint shapes) and touches neither DDS nor the motors.
         logging.info("--dry-run: constructing controller (no DDS, no motion)...")
-        c = Custom(args.checkpoint, meta, args.traj)
+        c = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale)
         logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s ff_d=%s ff_Ia=%s",
                      c.n_obs, c.n_ticks, c.blind,
                      meta.get("ff_damping_comp"), meta.get("ff_armature_comp"))
@@ -1271,7 +1290,7 @@ if __name__ == '__main__':
         ChannelFactoryInitialize(0)
 
 
-    custom = Custom(args.checkpoint, meta, args.traj)
+    custom = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale)
     custom.Init()
     custom.Start()
 
