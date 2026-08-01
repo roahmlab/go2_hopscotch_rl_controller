@@ -1,0 +1,27 @@
+run          : pz3_400
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     3.06°    10.26°    5.03°
+  pitch     3.86°    13.37°   -2.82°
+    yaw     3.89°    11.48°   -2.62°
+ odom x    0.051m    0.092m   0.035m
+ odom y    0.024m    0.052m   0.029m
+
+worst tilt (grav_z) : -0.927   (abort at > -0.40)
+|action| mean/max   : 0.251 / 1.000
+action saturation   : 0.4% of joint-ticks
+resid authority     : 0.75x (effective scale 0.150 rad)
+jitter (mrad/tick)  : 14.1
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.40s      ?    +60    +20    +60
+  touchdown   0.70s    n/a   +100    +80    +80
+    takeoff   1.10s      ?    +40    +40    +60
+  touchdown   1.40s    n/a      -      -    +80
+    takeoff   1.90s      ?      -      -    +80
+  touchdown   2.20s      -    +60   +120      -
+    takeoff   2.70s      -    +60    +60      -
+  touchdown   3.00s    n/a    +60    +60    +60

@@ -508,6 +508,9 @@ class Policy:
 
 
 def load_meta(ckpt_path, explicit=None):
+    """Returns (meta, path). The PATH is returned too because it names the run: a
+    checkpoint flown against the wrong meta is indistinguishable from one flown
+    against the right one unless the artifact says which was used."""
     p = explicit or os.path.join(os.path.dirname(os.path.abspath(ckpt_path)), "meta.json")
     if not os.path.exists(p):
         raise SystemExit(f"ABORT: no meta.json at {p} (pass --meta). This script is "
@@ -515,13 +518,22 @@ def load_meta(ckpt_path, explicit=None):
     with open(p) as f:
         meta = json.load(f)
     logging.info("meta: %s", p)
-    return meta
+    return meta, p
+
+
+# ------------------------------------------------------------------ run naming
+def _stem(path):
+    """basename without extension, reduced to characters that are safe in a filename.
+    Stray spaces in a path have bitten this script before (see the 2026-07-30 fix)."""
+    s = os.path.splitext(os.path.basename(str(path)))[0]
+    return "".join(c if (c.isalnum() or c in "._-") else "_" for c in s) or "unnamed"
 
 
 
 
 class Custom:
-    def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0):
+    def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0,
+                 meta_path=None):
         self.dt = CTRL_DT
         self.motiontime = 0
         # residual-authority attenuation (2026-07-31 sim verdict: the +3-5 cm apex /
@@ -588,6 +600,9 @@ class Custom:
             else:
                 raise SystemExit(f"ABORT: reference not found: {traj} (nor {local}). "
                                  f"Copy it next to the checkpoint or pass --traj.")
+        self.traj_path = traj                            # AFTER the local-copy fallback
+        self.ckpt_path = ckpt_path
+        self.meta_path = meta_path
         self.ref = HopscotchRef(traj,
                                 meta.get("ff_damping_comp", 0.0),
                                 meta.get("ff_armature_comp", 0.0))
@@ -675,7 +690,15 @@ class Custom:
                       ("t", "rpy", "rpy_ref", "ori_err", "odom_xy", "ref_xy", "vhat",
                        "tilt", "action", "contacts", "forces", "q", "qd", "q_target",
                        "tau_applied")}
-        self.run_tag = os.path.splitext(os.path.basename(ckpt_path))[0]
+        # Every artifact this run writes is named for the four things that decide what
+        # the robot actually did: which weights, which contract, how much residual
+        # authority they were given, and which reference they tracked. A png named for
+        # the checkpoint alone cannot be told apart from the same checkpoint flown at a
+        # different resid_scale or against a re-cut trajectory.
+        self.run_tag = "_".join([_stem(ckpt_path),
+                                 _stem(meta_path) if meta_path else "nometa",
+                                 f"r{self.RESID_SCALE:.2f}".replace(".", "p"),
+                                 _stem(traj)])
 
 
         # measured loop-rate meter (should read ~50 Hz)
@@ -927,9 +950,13 @@ class Custom:
         if not T or n < 2:
             logging.warning("no trace captured (run ended before the policy phase)")
             return None
-        os.makedirs(outdir, exist_ok=True)
+        # One directory per run, so the Vicon record can simply be dropped in next to
+        # the trace it belongs to. Files inside keep the full name anyway: a png
+        # copied OUT of here still says which checkpoint/meta/resid/traj produced it.
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        stem = os.path.join(outdir, f"{self.run_tag}_{stamp}")
+        rundir = os.path.join(outdir, f"{self.run_tag}_{stamp}")
+        os.makedirs(rundir, exist_ok=True)
+        stem = os.path.join(rundir, f"{self.run_tag}_{stamp}")
 
 
         t = T["t"]
@@ -940,6 +967,10 @@ class Custom:
 
         # ---- summary ------------------------------------------------------
         lines = [f"run          : {self.run_tag}",
+                 f"checkpoint   : {self.ckpt_path}",
+                 f"meta         : {self.meta_path}",
+                 f"reference    : {self.traj_path}",
+                 f"resid auth   : {self.RESID_SCALE:.2f}x",
                  f"outcome      : {'ABORTED (tilt)' if aborted else 'completed'}"
                  f"   {len(t)}/{self.n_ticks} ticks, {t[-1]:.2f}/{self.ref.duration:.2f} s",
                  f"contact-blind: {self.blind}",
@@ -971,6 +1002,8 @@ class Custom:
         fref = self.ref.force_ref[idx]                              # (N,4) N
         plan = self.ref.contact[idx]                                # (N,4) bool
         meas = T["forces"] > CONTACT_FORCE_THRESHOLD_HW             # (N,4)
+        qref = self.ref.q_ref[idx]                                  # (N,12) ISO, rad
+        qdref = self.ref.qd_ref[idx]                                # (N,12) ISO, rad/s
         lines += ["", "contact timing vs plan (ms, + = late; n/a = pad never released):",
                   f"{'event':>11}{'plan_t':>8}" + "".join(f"{nm:>7}" for nm in FOOT_NAMES)]
         events = {}                                # plan_tick -> {foot: delay_ms|None}
@@ -1004,13 +1037,48 @@ class Custom:
             lines.append(row)
 
 
+        # ---- joint tracking: the three quantities a residual controller lives on --
+        #   q_ref    the plan's angles
+        #   q_target q_ref + action_scale*resid_scale*action  -- what the PD was TOLD
+        #   q        what the joints did
+        # |q-cmd| is the servo's own error; |q-ref| is the deviation from the plan;
+        # |resid| is how much authority the policy actually spent. A run where
+        # |resid| >> |q-cmd| means the policy, not the PD, shaped the motion.
+        # NOTE velocity has no residual: _policy_tick commands dq = qd_ref unmodified.
+        e_plan = T["q"] - qref
+        e_cmd = T["q"] - T["q_target"]
+        resid = T["q_target"] - qref
+        e_qd = T["qd"] - qdref
+        lines += ["", "joint tracking (RMS over the run, rad / rad/s):",
+                  f"{'':>7}{'|q-ref|':>10}{'|q-cmd|':>10}{'|resid|':>10}"
+                  f"{'max|resid|':>12}{'|qd-ref|':>10}"]
+        for pi, part in enumerate(("hip", "thigh", "calf")):
+            sl = slice(pi * 4, pi * 4 + 4)             # ISO order is part-major
+            lines.append(f"{part:>7}{np.sqrt((e_plan[:, sl] ** 2).mean()):10.4f}"
+                         f"{np.sqrt((e_cmd[:, sl] ** 2).mean()):10.4f}"
+                         f"{np.sqrt((resid[:, sl] ** 2).mean()):10.4f}"
+                         f"{np.abs(resid[:, sl]).max():12.4f}"
+                         f"{np.sqrt((e_qd[:, sl] ** 2).mean()):10.3f}")
+        lines.append(f"{'all':>7}{np.sqrt((e_plan ** 2).mean()):10.4f}"
+                     f"{np.sqrt((e_cmd ** 2).mean()):10.4f}"
+                     f"{np.sqrt((resid ** 2).mean()):10.4f}"
+                     f"{np.abs(resid).max():12.4f}"
+                     f"{np.sqrt((e_qd ** 2).mean()):10.3f}")
+        worst = int(np.argmax(np.abs(e_cmd).max(0)))
+        lines.append(f"worst-tracked joint : {ISO_NAMES[worst]} "
+                     f"(max |q-cmd| {np.abs(e_cmd[:, worst]).max():.4f} rad)")
+
+
         report = "\n".join(lines)
         print("\n" + "=" * 62 + "\n" + report + "\n" + "=" * 62)
         with open(stem + ".txt", "w") as f:
             f.write(report + "\n")
         np.savez(stem + ".npz", n_ticks=self.n_ticks, aborted=aborted,
                  blind=self.blind, run_tag=self.run_tag,
-                 force_ref=fref, contact_plan=plan, **T)
+                 ckpt_path=str(self.ckpt_path), meta_path=str(self.meta_path),
+                 traj_path=str(self.traj_path), resid_scale=self.RESID_SCALE,
+                 action_scale=self.ACTION_SCALE, joint_names=np.array(ISO_NAMES),
+                 force_ref=fref, contact_plan=plan, q_ref=qref, qd_ref=qdref, **T)
 
 
         # ---- plot (lazy import: a headless robot may not have matplotlib) ----
@@ -1073,8 +1141,8 @@ class Custom:
         ax[5].set_ylabel("foot force [N?]")
         ax[5].set_xlabel("t [s]  (shaded = planned flight)")
         ax[5].legend(fontsize=8, loc="upper left", ncol=5)
-        fig.suptitle(f"{self.run_tag}   {'ABORTED' if aborted else 'completed'}   "
-                     f"blind={self.blind}", fontsize=11)
+        fig.suptitle(f"{self.run_tag}\n{'ABORTED' if aborted else 'completed'}   "
+                     f"blind={self.blind}   resid {self.RESID_SCALE:.2f}x", fontsize=9)
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         fig.savefig(stem + ".png", dpi=130)
         plt.close(fig)
@@ -1111,12 +1179,57 @@ class Custom:
                 h2, l2 = ar.get_legend_handles_labels()
                 a.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper left", ncol=3)
         ax[-1].set_xlabel("t [s]  (shaded = that foot's planned stance)")
-        fig.suptitle(f"{self.run_tag}  contact profile -- plan (N, dashed) vs "
-                     f"measured pad (raw)", fontsize=11)
+        fig.suptitle(f"{self.run_tag}\ncontact profile -- plan (N, dashed) vs "
+                     f"measured pad (raw)", fontsize=9)
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         fig.savefig(stem + "_contact.png", dpi=130)
         plt.close(fig)
-        logging.info("trace written: %s.{png,_contact.png,npz,txt}", stem)
+        # ---- joint tracking PNGs: 4 legs x 3 joints ---------------------------
+        # Position gets three curves because the controller is RESIDUAL: the plan, the
+        # plan plus what the policy added, and the measurement. The gap between the
+        # first two is the policy's contribution; the gap between the second and third
+        # is the servo's error. Reading only "ref vs actual" conflates them.
+        # Velocity gets two: qd_ref IS the commanded dq, untouched by the residual.
+        for what, meas_a, ref_a, cmd_a, unit, sfx in (
+                ("joint position", T["q"], qref, T["q_target"], "rad", "_joint_pos"),
+                ("joint velocity", T["qd"], qdref, None, "rad/s", "_joint_vel")):
+            fig, ax = plt.subplots(4, 3, figsize=(15, 11), sharex=True)
+            for li, leg in enumerate(FOOT_NAMES):
+                for pi, part in enumerate(("hip", "thigh", "calf")):
+                    a = ax[li][pi]
+                    j = pi * 4 + li                     # ISO order is part-major
+                    for s0, s1 in spans:
+                        a.axvspan(s0, s1, color="0.88", lw=0, zorder=0)
+                    a.plot(t, ref_a[:, j], "--", c="0.45", lw=1.3,
+                           label="plan ref" + ("" if cmd_a is not None
+                                               else " (= commanded dq)"))
+                    if cmd_a is not None:
+                        a.plot(t, cmd_a[:, j], c="C2", lw=1.0, alpha=0.9,
+                               label="ref + RL residual (commanded)")
+                    a.plot(t, meas_a[:, j], c="C0", lw=1.4, label="measured")
+                    base = cmd_a if cmd_a is not None else ref_a
+                    e = meas_a[:, j] - base[:, j]
+                    a.set_title(f"{leg}_{part}   RMS {np.sqrt((e ** 2).mean()):.4f} "
+                                f"max {np.abs(e).max():.4f} {unit}",
+                                fontsize=8, loc="left")
+                    if li == 3:
+                        a.set_xlabel("t [s]  (shaded = planned flight)")
+                    if pi == 0:
+                        a.set_ylabel(f"[{unit}]")
+            ax[0][0].legend(fontsize=7, loc="best")
+            fig.suptitle(f"{self.run_tag}\n{what} -- RMS/max quoted against the "
+                         f"COMMANDED value" + ("" if cmd_a is not None
+                                               else " (no residual on velocity)"),
+                         fontsize=9)
+            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            fig.savefig(stem + sfx + ".png", dpi=130)
+            plt.close(fig)
+
+
+        logging.info("trace written: %s/  (png, _contact.png, _joint_pos.png, "
+                     "_joint_vel.png, npz, txt)", rundir)
+        logging.info("  -> copy the Vicon record into that directory, then: "
+                     "python3 plot_base_pos.py --dir %s", rundir)
         return stem
 
 
@@ -1249,10 +1362,10 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/cshape_999.pt")
-    ap.add_argument("--meta", default="hopscotch_utils/cshape_meta.json", help="default: meta.json beside the checkpoint")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/pz3_999.pt")
+    ap.add_argument("--meta", default="hopscotch_utils/pz3_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
-    ap.add_argument("--resid_scale", type=float, default=1.0,
+    ap.add_argument("--resid_scale", type=float, default=0.50,
                     help="residual authority attenuation (1.0 = trained). 0.75 = the "
                          "2026-07-31 sim pick (every MJ-DR tail improved, partial apex/"
                          "timing fix, ~15 mrad); 0.5 = full nominal launch fix but opens "
@@ -1260,23 +1373,29 @@ if __name__ == '__main__':
                          "obs/ff/gains/ref untouched.")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
-    ap.add_argument("--out", default="runs",
-                    help="directory for the per-run trace (png/npz/txt). default: runs/")
+    ap.add_argument("--out", default="data",
+                    help="parent directory for per-run trace dirs. Each run gets its "
+                         "own data/<run_tag>_<stamp>/ holding png/_contact.png/npz/txt; "
+                         "drop the Vicon record in beside them. default: data/")
     ap.add_argument("iface", nargs="?", default=None)
     args = ap.parse_args()
 
 
-    meta = load_meta(args.checkpoint, args.meta)
+    meta, meta_path = load_meta(args.checkpoint, args.meta)
 
 
     if args.dry_run:
         # Construction does all the validation (contract checks, reference load, ff
         # bake, obs layout, checkpoint shapes) and touches neither DDS nor the motors.
         logging.info("--dry-run: constructing controller (no DDS, no motion)...")
-        c = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale)
+        c = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
+                   meta_path=meta_path)
         logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s ff_d=%s ff_Ia=%s",
                      c.n_obs, c.n_ticks, c.blind,
                      meta.get("ff_damping_comp"), meta.get("ff_armature_comp"))
+        logging.info("artifacts would land in: %s/%s_<stamp>/ "
+                     "(png, _contact.png, _joint_pos.png, _joint_vel.png, npz, txt)",
+                     args.out, c.run_tag)
         sys.exit(0)
 
 
@@ -1290,7 +1409,8 @@ if __name__ == '__main__':
         ChannelFactoryInitialize(0)
 
 
-    custom = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale)
+    custom = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
+                    meta_path=meta_path)
     custom.Init()
     custom.Start()
 

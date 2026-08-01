@@ -1,0 +1,14 @@
+                    apex z      gain  fwd travel
+            plan   0.4564m   0.2260m     0.6003m
+           vicon   0.5003m   0.2650m     0.4658m
+
+   flight window   plan apex  vicon apex     delta
+      0.40-0.70s     0.1999m     0.2006m  +0.0007m
+      1.10-1.40s     0.2188m     0.2650m  +0.0462m
+      1.90-2.20s     0.2260m     0.2537m  +0.0276m
+      2.70-3.00s     0.2043m     0.2052m  +0.0008m
+
+   axis    RMS err   max|err|     final
+      x    0.0611m    0.1555m  -0.1366m
+      y    0.0238m    0.0471m  -0.0185m
+      z    0.0323m    0.0795m  -0.0346m
