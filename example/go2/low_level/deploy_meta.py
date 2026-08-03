@@ -1362,10 +1362,10 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/pz3_999.pt")
-    ap.add_argument("--meta", default="hopscotch_utils/pz3_meta.json", help="default: meta.json beside the checkpoint")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/pz3wallv2_999.pt")
+    ap.add_argument("--meta", default="hopscotch_utils/pz3wallv2_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
-    ap.add_argument("--resid_scale", type=float, default=0.50,
+    ap.add_argument("--resid_scale", type=float, default=0.75,
                     help="residual authority attenuation (1.0 = trained). 0.75 = the "
                          "2026-07-31 sim pick (every MJ-DR tail improved, partial apex/"
                          "timing fix, ~15 mrad); 0.5 = full nominal launch fix but opens "

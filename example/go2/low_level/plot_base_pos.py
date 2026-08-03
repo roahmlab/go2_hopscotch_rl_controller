@@ -289,6 +289,12 @@ def main():
         run = np.load(run_path, allow_pickle=True)
         print(f"run trace: {run_path} ({len(run['t'])} ticks, "
               f"{'ABORTED' if bool(run['aborted']) else 'completed'})")
+        # The outputs belong WITH the trace they describe. Without this the plots land
+        # in the cwd and the next run silently overwrites them, which is how a haul of
+        # runs ends up with exactly one set of plots.
+        if not args.prefix:
+            args.prefix = os.path.join(os.path.dirname(run_path), "")
+            print(f"  -> writing plots + summary into {args.prefix}")
     else:
         print("no deploy_meta run trace found -- plotting plan vs mocap only")
 
@@ -406,17 +412,26 @@ def main():
     fig3.savefig(p + "overlay_base_pos.png", dpi=130)
 
     # ---- numbers ---------------------------------------------------------
+    # Accumulated rather than printed straight out, so the same text lands in the run
+    # directory: a png you cannot reread the numbers off is half an artifact.
     mz = moc[win, 2]
     rz = ref_xyz[:, 2]
-    print()
-    print(f"{'':>16}{'apex z':>10}{'gain':>10}{'fwd travel':>12}")
-    print(f"{'plan':>16}{rz.max():9.4f}m{rz.max() - rz[0]:9.4f}m"
-          f"{ref_xyz[-1, 0] - ref_xyz[0, 0]:11.4f}m")
-    print(f"{'vicon':>16}{mz.max():9.4f}m{mz.max() - mz[0]:9.4f}m"
-          f"{moc[win][-1, 0] - moc[win][0, 0]:11.4f}m")
-
-    # per-flight apex: the number that says whether the hop cleared what it planned to
-    print(f"\n{'flight window':>16}{'plan apex':>12}{'vicon apex':>12}{'delta':>10}")
+    out = [f"mocap        : {os.path.abspath(args.mocap)}",
+           f"run trace    : {os.path.abspath(run_path) if run is not None else '(none)'}",
+           f"plan         : {os.path.abspath(args.traj)}",
+           f"sync         : t0 {t0:.3f} s into the recording"
+           + (f", correlation r {r:.3f}" if np.isfinite(r) else " (manual)"),
+           f"frame        : yaw {np.degrees(yaw):+.1f} deg, "
+           f"zeroed on the first {args.settle:.1f} s",
+           "",
+           f"{'':>16}{'apex z':>10}{'gain':>10}{'fwd travel':>12}",
+           f"{'plan':>16}{rz.max():9.4f}m{rz.max() - rz[0]:9.4f}m"
+           f"{ref_xyz[-1, 0] - ref_xyz[0, 0]:11.4f}m",
+           f"{'vicon':>16}{mz.max():9.4f}m{mz.max() - mz[0]:9.4f}m"
+           f"{moc[win][-1, 0] - moc[win][0, 0]:11.4f}m",
+           "",
+           # per-flight apex: whether each hop cleared what it planned to
+           f"{'flight window':>16}{'plan apex':>12}{'vicon apex':>12}{'delta':>10}"]
     for s0, s1 in spans:
         if s1 - s0 < 0.05:
             continue
@@ -426,17 +441,22 @@ def main():
             continue
         pa = rz[rm].max() - rz[0]
         va = moc[mm, 2].max() - mz[0]
-        print(f"{f'{s0:.2f}-{s1:.2f}s':>16}{pa:11.4f}m{va:11.4f}m{va - pa:+9.4f}m")
+        out.append(f"{f'{s0:.2f}-{s1:.2f}s':>16}{pa:11.4f}m{va:11.4f}m{va - pa:+9.4f}m")
 
     err = moc[win] - ref_on_moc                    # moc is already rotated + zeroed
-    print(f"\n{'axis':>7}{'RMS err':>11}{'max|err|':>11}{'final':>10}")
+    out += ["", f"{'axis':>7}{'RMS err':>11}{'max|err|':>11}{'final':>10}"]
     for i, lbl in enumerate("xyz"):
         e = err[:, i]
-        print(f"{lbl:>7}{np.sqrt((e ** 2).mean()):10.4f}m{np.abs(e).max():10.4f}m"
-              f"{e[-1]:9.4f}m")
+        out.append(f"{lbl:>7}{np.sqrt((e ** 2).mean()):10.4f}m{np.abs(e).max():10.4f}m"
+                   f"{e[-1]:9.4f}m")
+
+    report = "\n".join(out)
+    print("\n" + report)
+    with open(p + "vicon_base_pos.txt", "w") as f:
+        f.write(report + "\n")
 
     print(f"\nwrote {p}plan_base_pos.png, {p}mocap_base_pos.png, "
-          f"{p}overlay_base_pos.png")
+          f"{p}overlay_base_pos.png, {p}vicon_base_pos.txt")
     if args.show:
         plt.show()
 
