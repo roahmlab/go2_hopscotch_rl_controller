@@ -47,8 +47,7 @@ class Custom:
         self.Kp_stand = 60.0
         self.Kd_stand = 5.0
 
-        self.dt = 0.005
-        self.stride = 5
+        # dt and stride come from the checkpoint's ctrl_decim (set after the actor loads).
         self.traj_end = 3400
 
 
@@ -63,22 +62,23 @@ class Custom:
         # folded pose (feet tucked under hips, unloaded), MuJoCo order [FL, FR, RL, RR]
         self.foldPos = np.array([0.0, 1.36, -2.65, 0.0, 1.36, -2.65,
                                  0.2, 1.36, -2.65, -0.2, 1.36, -2.65])
-        self.fold_duration = 200
+        # Phase lengths in SECONDS; tick counts are derived once the control rate is known.
+        self.fold_s = 1.0
         self.fold_percent = 0
 
-        self.alignment_duration = 200
+        self.alignment_s = 1.0
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_duration = 600
+        self.hold_s = 10.0
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)
-        self.handoff_fade_ticks = 40
+        self.handoff_fade_s = 0.5
         self.handoff_fade_gain = 0.5
 
-        self.settle_duration = 400
+        self.settle_s = 2.0
         self.settle_percent = 0
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
@@ -122,9 +122,12 @@ class Custom:
             ck = pickle.load(file)
         self.actor = ck["actor"]
         self.arch = str(np.asarray(ck.get("arch", "gru")))
+        # ctrl_decim and preview are counted in TRAINER SUBSTEPS; sim_ms converts both onto
+        # the 1 kHz reference grid this script indexes with self.ii.
+        self.sim_ms = int(np.asarray(ck.get("sim_ms", 1)))
         self.Kp = float(np.asarray(ck.get("kp", ck.get("pd_kp", self.Kp))))
         self.Kd = float(np.asarray(ck.get("kd", ck.get("pd_kd", self.Kd))))
-        self.preview_offsets = tuple(int(o) for o in ck["preview"])
+        self.preview_offsets = tuple(int(o) * self.sim_ms for o in ck["preview"])
         self.use_accelerometer = bool(np.asarray(ck.get("accelerometer", False)).item())
         self.accelerometer_gravity = float(
             np.asarray(ck.get("accelerometer_gravity", 9.81)).item())
@@ -140,10 +143,19 @@ class Custom:
         else:
             self.setup_transformer(ck)
         assert self.nf == obs_width, f"obs width {obs_width} != actor NF {self.nf}"
+        self.stride = int(np.asarray(ck.get("ctrl_decim", 5))) * self.sim_ms
+        self.dt = self.stride * 0.001
+        self.fold_duration = round(self.fold_s / self.dt)
+        self.alignment_duration = round(self.alignment_s / self.dt)
+        self.hold_duration = round(self.hold_s / self.dt)
+        self.settle_duration = round(self.settle_s / self.dt)
+        self.handoff_fade_ticks = round(self.handoff_fade_s / self.dt)
         sizes = ([int(np.asarray(s)) for s in ck["gru_sizes"]] if self.arch == "gru"
                  else [int(np.asarray(ck["tf"]["d"])), int(np.asarray(ck["tf"]["k_obs"]))])
         print(f"{self.blind}: arch {self.arch} {sizes} iter {ck.get('iter')} "
-              f"kp {self.Kp:g} kd {self.Kd:g} preview {self.preview_offsets}", flush=True)
+              f"kp {self.Kp:g} kd {self.Kd:g} preview {self.preview_offsets} "
+              f"rate {1/self.dt:.0f} Hz (stride {self.stride}, substep {self.sim_ms} ms)",
+              flush=True)
 
         # Get q0 and qf
         self.q0 = self.x_ref[0][7:19]
@@ -155,7 +167,7 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
-        self.gyro_alpha = 0.5
+        self.gyro_alpha = 0.4
         self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
