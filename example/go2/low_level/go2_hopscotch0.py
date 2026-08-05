@@ -405,8 +405,12 @@ class Custom:
             # current
             dof_pos = np.array([self.low_state.motor_state[i].q for i in range(12)])
             dof_vel = np.array([self.low_state.motor_state[i].dq for i in range(12)])
+            tau_meas = np.array([self.low_state.motor_state[i].tau_est for i in range(12)])
             dof_pos = dof_pos[self.JOINT_REORDERING]
             dof_vel = dof_vel[self.JOINT_REORDERING]
+            tau_meas = tau_meas[self.JOINT_REORDERING]
+            # Read unconditionally: logged even when the actor does not consume it.
+            accel = np.nan_to_num(np.asarray(self.low_state.imu_state.accelerometer, dtype=float))
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
@@ -429,9 +433,8 @@ class Custom:
             upd = self.u_ref[self.ii] + self.Kp * (xr[7:19] - dof_pos) + self.Kd * (xr[25:37] - dof_vel)
             obs = [st]
             if self.use_accelerometer:
-                acceleration = np.asarray(self.low_state.imu_state.accelerometer)
                 limit = self.accelerometer_clip_g * self.accelerometer_gravity
-                obs.append(np.clip(np.nan_to_num(acceleration), -limit, limit))
+                obs.append(np.clip(accel, -limit, limit))
             obs.extend([rf - st, upd, [self.ii / self.traj_length]])
             for off in self.preview_offsets:
                 obs.append(self.ref_feat[min(self.ii + off, self.traj_length)])
@@ -471,7 +474,8 @@ class Custom:
             self.inf_sum += inf
             self.inf_max = max(self.inf_max, inf)
             self.log_inf.append(inf)
-            self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat, ang_vel_body, v]))
+            self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat,
+                                                  ang_vel_body, v, tau_meas, total, accel]))
 
             self.ii += self.stride
 
@@ -525,7 +529,8 @@ if __name__ == '__main__':
            time.sleep(1)
            np.savez("run_log.npz", tick=np.array(custom.log_tick),
                     align=np.array(custom.log_align), inf=np.array(custom.log_inf),
-                    state=np.array(custom.log_state), sat=np.array(custom.log_sat))
+                    state=np.array(custom.log_state), sat=np.array(custom.log_sat),
+                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3")
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
                print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
