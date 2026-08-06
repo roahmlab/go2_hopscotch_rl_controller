@@ -117,6 +117,12 @@ if has_foot and plan_c is not None:
     tail += ("\n          contact schedule agreement  "
              + "  ".join(f"{f} {100 * a:.0f}%" for f, a in zip(FEET, agree))
              + f"   (all {100 * (foot_c == plan_c).mean():.0f}%)")
+    # Scale check: if foot_force really is Newtons these ratios sit near 1.
+    fz = plan_F[:, :, 2]
+    tail += ("\n          stance Fz measured/planned  "
+             + "  ".join(f"{f} {foot[plan_c[:, i], i].mean() / max(fz[plan_c[:, i], i].mean(), 1e-6):.2f}"
+                         for i, f in enumerate(FEET))
+             + f"   rms err {np.sqrt(((foot - fz)[plan_c] ** 2).mean()):.1f} N")
 if has_mocap:
     pe = mocap - pos_r
     tail += ("\n          mocap pos err rms "
@@ -226,11 +232,8 @@ if has_foot:
             ax.fill_between(tt, 0, 1, where=plan_c[:, i], transform=ax.get_xaxis_transform(),
                             color="C0", alpha=0.12, lw=0, zorder=0, label="planned stance")
             ax.plot(tt, plan_F[:, i, 2], "--", c="0.35", lw=1.3, label="planned Fz [N]")
+        ax.plot(tt, foot[:, i], c="C1", lw=1.2, label="measured Fz [N]")
         ax.set_ylabel(f"{f}  Fz [N]")
-        # Raw sensor counts share the axis only through a twin: the scale is arbitrary.
-        tw = ax.twinx()
-        tw.plot(tt, foot[:, i], c="C1", lw=1.2, label="measured (raw)")
-        tw.set_ylabel("sensor [raw]", fontsize=8)
     axes[0, 0].legend(fontsize=8, loc="upper left")
     fig.tight_layout()
     fig.savefig(f"{PREFIX}_contact.png", dpi=150)
