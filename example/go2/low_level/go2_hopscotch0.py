@@ -175,6 +175,8 @@ class Custom:
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
         self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
+        # Feet follow the same convention: MuJoCo [FL,FR,RL,RR] <- Unitree [FR,FL,RR,RL]
+        self.FOOT_REORDERING = np.array([1, 0, 3, 2])
 
 
     def setup_transformer(self, ck):
@@ -411,6 +413,8 @@ class Custom:
             tau_meas = tau_meas[self.JOINT_REORDERING]
             # Read unconditionally: logged even when the actor does not consume it.
             accel = np.nan_to_num(np.asarray(self.low_state.imu_state.accelerometer, dtype=float))
+            foot_force = np.nan_to_num(np.asarray(
+                self.low_state.foot_force, dtype=float).ravel()[:4])[self.FOOT_REORDERING]
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
@@ -475,7 +479,8 @@ class Custom:
             self.inf_max = max(self.inf_max, inf)
             self.log_inf.append(inf)
             self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat,
-                                                  ang_vel_body, v, tau_meas, total, accel]))
+                                                  ang_vel_body, v, tau_meas, total, accel,
+                                                  foot_force]))
 
             self.ii += self.stride
 
@@ -530,7 +535,7 @@ if __name__ == '__main__':
            np.savez("run_log.npz", tick=np.array(custom.log_tick),
                     align=np.array(custom.log_align), inf=np.array(custom.log_inf),
                     state=np.array(custom.log_state), sat=np.array(custom.log_sat),
-                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3")
+                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3,foot4")
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
                print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "

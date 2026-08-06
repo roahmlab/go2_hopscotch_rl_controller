@@ -133,7 +133,9 @@ class Custom:
             np.asarray(ck.get("accelerometer_gravity", 9.81)).item())
         self.accelerometer_clip_g = float(
             np.asarray(ck.get("accelerometer_clip_g", 16.0)).item())
-        obs_width = 73 + 3 * self.use_accelerometer + 30 * len(self.preview_offsets)
+        self.use_mocap = str(np.asarray(ck.get("obs", ""))) == "euler_v3_pos"
+        obs_width = (73 + 3 * self.use_accelerometer + 3 * self.use_mocap
+                     + 30 * len(self.preview_offsets))
         if self.arch == "gru":
             self.h_offs = np.cumsum([0] + [uz.shape[0] for _, uz, *_ in self.actor[0]])
             self.h = np.zeros(self.h_offs[-1], dtype=np.float32)
@@ -172,9 +174,28 @@ class Custom:
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
+        # Mocap channel (written as ONE tuple by the mocap thread; tuple reads are atomic).
+        self.mocap_sample = None          # (t_recv, fnum, p_raw_m(3,), quat(4,) or None)
+        self.mocap_zero = None            # p_zero(3,) after calibration
+        self.mocap_R = None               # 2x2 Rz(-yaw0) for the xy frame fit
+        self.mocap_last_fnum = None
+        self.mocap_fake_fnum = 0
+        self.mocap_occluded = 0
+        self.mocap_call_max = 0.0
+        self.mocap_age_max = 0.0
+        self.mocap_cal = []               # (t, fnum, p, q) collected during hold
+        self.mocap_max_age = 0.1          # s; older than this mid-run -> damping fault
+        self.mocap_dt = 1.0 / 200.0
+        self.p_meas = np.full(3, np.nan)
+        self.p_raw = np.full(3, np.nan)
+        self.mocap_age = np.nan
+        self.mocap_seq = -1
+
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
         self.JOINT_REORDERING = np.array([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8])
+        # Feet follow the same convention: MuJoCo [FL,FR,RL,RR] <- Unitree [FR,FL,RR,RL]
+        self.FOOT_REORDERING = np.array([1, 0, 3, 2])
 
 
     def setup_transformer(self, ck):
@@ -248,6 +269,9 @@ class Custom:
     def Init(self):
         self.InitLowCmd()
 
+        if self.use_mocap:
+            self.InitMocap()
+
         # create publisher #
         self.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         self.lowcmd_publisher.Init()
@@ -271,7 +295,58 @@ class Custom:
             status, result = self.msc.CheckMode()
             time.sleep(1)
 
+    def InitMocap(self):
+        """Connects to Vicon (ServerPush), caches the root segment, and times get_frame() before any motion."""
+        import pyvicon_datastream as pv
+        self.pv = pv
+        host, subject = "192.168.0.149", "go2"
+        self.mocap_subject = subject
+        vicon = pv.PyViconDatastream()
+        res = vicon.connect(host)
+        if isinstance(res, pv.Result) and res != pv.Result.Success:
+            raise SystemExit(f"ABORT: cannot connect to Vicon at {host} ({res})")
+        vicon.set_stream_mode(pv.StreamMode.ServerPush)
+        vicon.enable_segment_data()
+        for _ in range(300):
+            if vicon.get_frame() == pv.Result.Success:
+                break
+            time.sleep(0.01)
+        else:
+            raise SystemExit(f"ABORT: connected to {host} but no frame in 3 s -- is Tracker streaming?")
+        try:
+            names = [str(vicon.get_subject_name(i)) for i in range(vicon.get_subject_count())]
+            if subject not in names:
+                raise SystemExit(f"ABORT: subject {subject!r} not in {names}")
+        except SystemExit:
+            raise
+        except Exception:
+            print("vicon subject enumeration unavailable; trusting subject name", flush=True)
+        seg = vicon.get_subject_root_segment_name(subject)
+        if not seg:
+            raise SystemExit(f"ABORT: no root segment for subject {subject!r}")
+        self.mocap_seg = seg
+        self.mocap_has_fnum = hasattr(vicon, "get_frame_number")
+        self.vicon = vicon
+
+        # Startup probe: if get_frame() blocks under ServerPush, learn it here, not mid-jump.
+        calls, worst, t0 = 0, 0.0, time.perf_counter()
+        while time.perf_counter() - t0 < 1.0:
+            c0 = time.perf_counter()
+            vicon.get_frame()
+            worst = max(worst, time.perf_counter() - c0)
+            calls += 1
+        print(f"vicon: {subject}/{seg} at {host}, {calls} get_frame calls/s, "
+              f"worst {1e3 * worst:.2f} ms", flush=True)
+        if worst > 2e-3:
+            print(f"WARNING: get_frame() blocked up to {1e3 * worst:.1f} ms -- ServerPush is "
+                  "waiting on frames; consider a separate bridge process", flush=True)
+
     def Start(self):
+        if self.use_mocap:
+            self.mocapThreadPtr = RecurrentThread(
+                interval=self.mocap_dt, target=self.UpdateMocap, name="updatemocap"
+            )
+            self.mocapThreadPtr.Start()
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd"
         )
@@ -294,6 +369,90 @@ class Custom:
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
 
+    def UpdateMocap(self):
+        """200 Hz poll: de-dup by frame number, NaN-guard occlusion, publish one atomic tuple."""
+        c0 = time.perf_counter()
+        ok = self.vicon.get_frame() == self.pv.Result.Success
+        now = time.perf_counter()
+        self.mocap_call_max = max(self.mocap_call_max, now - c0)
+        if not ok:
+            return
+        if self.mocap_has_fnum:
+            fnum = int(self.vicon.get_frame_number())
+            if fnum == self.mocap_last_fnum:
+                return
+            self.mocap_last_fnum = fnum
+        else:
+            self.mocap_fake_fnum += 1
+            fnum = self.mocap_fake_fnum
+        pos = self.vicon.get_segment_global_translation(self.mocap_subject, self.mocap_seg)
+        rot = self.vicon.get_segment_global_quaternion(self.mocap_subject, self.mocap_seg)
+        p = None if pos is None else np.asarray(pos, float).ravel()[:3] * 1e-3
+        if p is not None and not np.any(p):
+            p = None
+        if p is None or not np.isfinite(p).all():
+            self.mocap_occluded += 1
+            return
+        q = None if rot is None else np.asarray(rot, float).ravel()[:4]
+        self.mocap_sample = (now, fnum, p, q)
+
+    def _cal_append(self):
+        s = self.mocap_sample
+        if s is not None and (not self.mocap_cal or s[1] != self.mocap_cal[-1][1]):
+            self.mocap_cal.append(s)
+            if len(self.mocap_cal) > 400:
+                self.mocap_cal = self.mocap_cal[-400:]
+
+    def CalibrateMocap(self):
+        """Zeros the Vicon frame on the standing pose; detects quat order from levelness; aborts on the ground if unusable."""
+        now = time.perf_counter()
+        recent = [s for s in self.mocap_cal if now - s[0] < 1.0]
+        window = [s for s in recent if now - s[0] < 0.25]
+        if len(recent) < 50 or len(window) < 12:
+            print(f"MOCAP ABORT: flow too thin ({len(recent)}/1.0s, {len(window)}/0.25s, "
+                  f"occluded {self.mocap_occluded})", flush=True)
+            return False
+        self.mocap_zero = np.median(np.stack([s[2] for s in window]), axis=0)
+        quats = [s[3] for s in window if s[3] is not None and np.isfinite(s[3]).all()]
+        if not quats:
+            print("MOCAP ABORT: no quaternion data for the frame fit", flush=True)
+            return False
+        qm = np.mean(np.stack(quats), axis=0)
+        qm = qm / np.linalg.norm(qm)
+        e_w = quat2eul(qm)                    # wrapper delivers w-first
+        e_x = quat2eul(np.roll(qm, 1))        # wrapper delivers xyzw
+        lvl_w, lvl_x = abs(e_w[0]) + abs(e_w[1]), abs(e_x[0]) + abs(e_x[1])
+        eul, order = (e_w, "wxyz") if lvl_w <= lvl_x else (e_x, "xyzw")
+        deg = np.degrees(eul)
+        if abs(deg[0]) > 10 or abs(deg[1]) > 10:
+            print(f"MOCAP ABORT: standing robot reads roll {deg[0]:.1f} pitch {deg[1]:.1f} deg "
+                  f"({order}) -- template not level or quat order wrong", flush=True)
+            return False
+        if abs(deg[2]) > 15:
+            print(f"MOCAP ABORT: yaw offset {deg[2]:.1f} deg -- realign the robot with the "
+                  "Vicon template before running", flush=True)
+            return False
+        c, s = np.cos(eul[2]), np.sin(eul[2])
+        self.mocap_R = np.array([[c, s], [-s, c]])
+        print(f"mocap calibrated: zero {np.round(self.mocap_zero, 4)} yaw {deg[2]:+.2f} deg "
+              f"(quat {order}, {len(window)} samples, occluded {self.mocap_occluded})", flush=True)
+        return True
+
+    def MocapPosition(self, now):
+        """Latest mocap in the reference frame, or None past the staleness limit."""
+        s = self.mocap_sample
+        if s is None or now - s[0] > self.mocap_max_age:
+            return None
+        delta = s[2] - self.mocap_zero
+        xy = self.mocap_R @ delta[:2]
+        self.p_raw = s[2]
+        self.mocap_age = now - s[0]
+        self.mocap_age_max = max(self.mocap_age_max, self.mocap_age)
+        self.mocap_seq = s[1]
+        # Anchored to this script's own x_ref[0], so the trainer's REF_Z_OFFSET cancels;
+        # do not "fix" the offset here or in the trainer alone.
+        return self.x_ref[0, :3] + np.array([xy[0], xy[1], delta[2]])
+
     def LowCmdWrite(self):
 
         now = time.perf_counter()
@@ -306,12 +465,16 @@ class Custom:
                 self.log_align.append(dtick)
             self.n_tick += 1
             if self.n_tick % 200 == 0:
+                mtail = (f" | mocap call max {1e3 * self.mocap_call_max:.2f} "
+                         f"age max {1e3 * self.mocap_age_max:.1f} ms "
+                         f"occl {self.mocap_occluded}" if self.use_mocap else "")
                 print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
                       f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms | "
-                      f"sat {self.sat_cnt}/200 peak {self.sat_peak:.2f}x", flush=True)
+                      f"sat {self.sat_cnt}/200 peak {self.sat_peak:.2f}x{mtail}", flush=True)
                 self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
                 self.sat_peak = 0.0
                 self.sat_cnt = 0
+                self.mocap_call_max = self.mocap_age_max = 0.0
         self.tick_prev = now
 
         if self.low_state is None:
@@ -367,6 +530,8 @@ class Custom:
             # stage 3: hold q0, integrate out the static holding torque
             self.hold_percent += 1.0 / self.hold_duration
             self.hold_percent = min(self.hold_percent, 1)
+            if self.use_mocap:
+                self._cal_append()
 
             for i in range(12):
                 idx = self.JOINT_REORDERING[i]
@@ -388,6 +553,12 @@ class Custom:
 
         elif (self.hold_percent >= 1) and (self.ii < self.traj_end):
 
+            if self.use_mocap and self.mocap_zero is None:
+                if not self.CalibrateMocap():
+                    self.fault = True
+                    print("FAULT: mocap calibration failed, entering damping mode", flush=True)
+                    return
+
             imu_quat = np.array(self.low_state.imu_state.quaternion)
             nq = np.linalg.norm(imu_quat)
             if nq > 1e-6:
@@ -402,6 +573,17 @@ class Custom:
 
             inf_t0 = time.perf_counter()
 
+            if self.use_mocap:
+                p_meas = self.MocapPosition(inf_t0)
+                if p_meas is None:
+                    self.fault = True
+                    s = self.mocap_sample
+                    age = "none" if s is None else f"{1e3 * (inf_t0 - s[0]):.0f} ms"
+                    print(f"FAULT: mocap stale ({age}) at ii={self.ii}, entering damping mode",
+                          flush=True)
+                    return
+                self.p_meas = p_meas
+
             # current
             dof_pos = np.array([self.low_state.motor_state[i].q for i in range(12)])
             dof_vel = np.array([self.low_state.motor_state[i].dq for i in range(12)])
@@ -411,6 +593,8 @@ class Custom:
             tau_meas = tau_meas[self.JOINT_REORDERING]
             # Read unconditionally: logged even when the actor does not consume it.
             accel = np.nan_to_num(np.asarray(self.low_state.imu_state.accelerometer, dtype=float))
+            foot_force = np.nan_to_num(np.asarray(
+                self.low_state.foot_force, dtype=float).ravel()[:4])[self.FOOT_REORDERING]
 
             base_quat = quat_mul(self.q_off, imu_quat)
             base_quat = base_quat / np.linalg.norm(base_quat)
@@ -435,7 +619,10 @@ class Custom:
             if self.use_accelerometer:
                 limit = self.accelerometer_clip_g * self.accelerometer_gravity
                 obs.append(np.clip(accel, -limit, limit))
-            obs.extend([rf - st, upd, [self.ii / self.traj_length]])
+            obs.extend([rf - st, upd])
+            if self.use_mocap:
+                obs.append(xr[:3] - self.p_meas)
+            obs.append([self.ii / self.traj_length])
             for off in self.preview_offsets:
                 obs.append(self.ref_feat[min(self.ii + off, self.traj_length)])
             obs = np.clip(np.nan_to_num(np.concatenate(obs)), -1e4, 1e4).astype(np.float32)
@@ -475,7 +662,9 @@ class Custom:
             self.inf_max = max(self.inf_max, inf)
             self.log_inf.append(inf)
             self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat,
-                                                  ang_vel_body, v, tau_meas, total, accel]))
+                                                  ang_vel_body, v, tau_meas, total, accel,
+                                                  foot_force, self.p_meas, self.p_raw,
+                                                  [self.mocap_age, self.mocap_seq]]))
 
             self.ii += self.stride
 
@@ -530,7 +719,8 @@ if __name__ == '__main__':
            np.savez("run_log.npz", tick=np.array(custom.log_tick),
                     align=np.array(custom.log_align), inf=np.array(custom.log_inf),
                     state=np.array(custom.log_state), sat=np.array(custom.log_sat),
-                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3")
+                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3,foot4,"
+                           "mocap3,mocap_raw3,mocap_age1,mocap_seq1")
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
                print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "

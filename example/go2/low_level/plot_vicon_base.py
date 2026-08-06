@@ -135,7 +135,7 @@ def fit_yaw(xy_m, xy_r):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mocap", nargs="?", default=str(BASE / "xyz_go2_v5.npz"))
+    ap.add_argument("mocap", nargs="?", default=str(BASE / "xyz_go2.npz"))
     ap.add_argument("prefix", nargs="?", default=None)
     ap.add_argument("--ref", default=str(REF))
     ap.add_argument("--t0", type=float, default=None, help="seconds into the recording where plan t=0 lands")
@@ -199,32 +199,18 @@ def main():
               f"cluster is mounted rotated)")
 
     crop = (t_al >= -args.pad) & (t_al <= dur + args.pad)
-    ncol = 2 if eul_m is not None else 1
-    fig, axes = plt.subplots(3, ncol, sharex=True, figsize=(8 * ncol + 3, 9), squeeze=False)
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(11, 9))
     for i, lbl in enumerate("xyz"):
-        ax = axes[i, 0]
         for a, b in FLIGHTS_S:
-            ax.axvspan(a, b, color="0.9", lw=0, zorder=0)
-        ax.plot(t_r, ref[:, i], "--", c="0.35", lw=1.5, label="reference")
-        ax.plot(t_al[crop], moc[crop, i], c="C1", lw=1.6, label="vicon")
-        ax.set_ylabel(f"{lbl} [m]")
-        ax.grid(alpha=0.3)
-        ax.set_xlim(-args.pad, dur + args.pad)
-    axes[0, 0].legend(fontsize=9, loc="upper left")
-    axes[0, 0].set_title("position")
-    axes[2, 0].set_xlabel("t [s]   (shaded = planned flight)")
-    if eul_m is not None:
-        for i, lbl in enumerate(("roll", "pitch", "yaw")):
-            ax = axes[i, 1]
-            for a, b in FLIGHTS_S:
-                ax.axvspan(a, b, color="0.9", lw=0, zorder=0)
-            ax.plot(t_r, eul_r[:, i], "--", c="0.35", lw=1.5)
-            ax.plot(t_al[crop], eul_m[crop, i], c="C1", lw=1.6)
-            ax.set_ylabel(f"{lbl} [deg]")
-            ax.grid(alpha=0.3)
-        axes[0, 1].set_title("orientation")
-        axes[2, 1].set_xlabel("t [s]   (shaded = planned flight)")
-    fig.suptitle(f"Base pose: reference vs Vicon -- {mocap.name}"
+            axes[i].axvspan(a, b, color="0.9", lw=0, zorder=0)
+        axes[i].plot(t_r, ref[:, i], "--", c="0.35", lw=1.5, label="reference")
+        axes[i].plot(t_al[crop], moc[crop, i], c="C1", lw=1.6, label="vicon")
+        axes[i].set_ylabel(f"{lbl} [m]")
+        axes[i].grid(alpha=0.3)
+        axes[i].set_xlim(-args.pad, dur + args.pad)
+    axes[0].legend(fontsize=9, loc="upper left")
+    axes[2].set_xlabel("t [s]   (shaded = planned flight)")
+    fig.suptitle(f"Base position: reference vs Vicon -- {mocap.name}"
                  + (f"   (sync r={r:.2f}, yaw {np.degrees(yaw):+.0f} deg)" if np.isfinite(r) else ""))
     fig.tight_layout()
     fig.savefig(f"{prefix}_base_overlay.png", dpi=130)
