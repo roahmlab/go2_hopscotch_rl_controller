@@ -1,0 +1,31 @@
+log   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/run_log.npz
+rows  : 340  0.00-3.39 s @ 100 Hz
+
+     joint    q rms    q max   dq rms   dq max    |v|max  |tau|max  tau/lim   sat
+    FL hip  0.0629   0.1739    1.435    5.355   20.5059    20.186     0.85     0
+  FL thigh  0.0756   0.2628    1.495    7.069   16.6938    26.544     1.12    12
+   FL calf  0.0854   0.3805    2.073    9.067   53.4239    50.023     1.10     5
+    FR hip  0.0400   0.1637    1.527    7.980   26.2987    20.632     0.87     0
+  FR thigh  0.0521   0.2428    1.787   11.895   20.2472    19.296     0.81     0
+   FR calf  0.0919   0.4191    2.391   10.680   53.4812    46.846     1.03     1
+    RL hip  0.0636   0.2643    1.747    9.707   27.8451    17.317     0.73     0
+  RL thigh  0.0386   0.1122    1.236    6.536   23.8218    13.631     0.58     0
+   RL calf  0.0659   0.2891    1.618    6.508   23.4819    43.906     0.97     0
+    RR hip  0.0668   0.2092    1.581    6.168   22.5521    25.530     1.08     1
+  RR thigh  0.0471   0.1338    1.668   10.370   15.1698    19.073     0.80     0
+   RR calf  0.0558   0.2587    1.524    6.908   18.6291    45.281     1.00     0
+
+      axis        rms   max|err|     final
+      roll     3.317°    10.042°    2.564°
+     pitch     2.302°     7.531°   -2.316°
+       yaw     4.350°    10.160°    1.083°
+        wx    0.879r/s    3.824r/s   0.684r/s
+        wy    0.588r/s    2.316r/s  -0.058r/s
+        wz    0.361r/s    1.275r/s  -0.236r/s
+
+overall   q rms 0.0642 rad   dq rms 1.699 rad/s   |v| mean 3.733 max 53.481 Nm
+          peak tau/limit 1.12   ticks with any joint saturated 19/340   cmd-meas rms 6.86 Nm
+          accel |.| mean 11.14 max 40.42 m/s^2
+          contact schedule agreement  FL 49%  FR 72%  RL 72%  RR 84%   (all 69%)
+          stance Fz measured/planned  FL 0.41  FR 0.58  RL 0.64  RR 0.75   rms err 57.9 N
+          mocap pos err rms x 0.0233m  y 0.0500m  z 0.0297m   age med 0.1 max 26.5 ms   frames dropped 119

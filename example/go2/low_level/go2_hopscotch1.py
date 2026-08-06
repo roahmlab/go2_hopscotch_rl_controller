@@ -82,7 +82,7 @@ class Custom:
         self.Ki = 100.0
         self.tau_i_max = 15.0
         self.tau_i = np.zeros(12)
-        self.handoff_fade_s = 0.5
+        self.handoff_fade_s = 0.1
         self.handoff_fade_gain = 0.5
 
         self.settle_s = 2.0
@@ -176,7 +176,7 @@ class Custom:
         self.q_off = None
         self.last_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.fault = False
-        self.gyro_alpha = 0.4
+        self.gyro_alpha = 1.0
         self.gyro_f = None
 
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
