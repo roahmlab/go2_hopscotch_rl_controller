@@ -185,7 +185,7 @@ class Custom:
         self.mocap_age_max = 0.0
         self.mocap_cal = []               # (t, fnum, p, q) collected during hold
         self.mocap_max_age = 0.1          # s; older than this mid-run -> damping fault
-        self.mocap_dt = 1.0 / 200.0
+        self.mocap_dt = 1.0 / 500.0
         self.p_meas = np.full(3, np.nan)
         self.p_raw = np.full(3, np.nan)
         self.mocap_age = np.nan
@@ -305,7 +305,10 @@ class Custom:
         res = vicon.connect(host)
         if isinstance(res, pv.Result) and res != pv.Result.Success:
             raise SystemExit(f"ABORT: cannot connect to Vicon at {host} ({res})")
-        vicon.set_stream_mode(pv.StreamMode.ServerPush)
+        # Prefetch, not ServerPush: ServerPush blocks get_frame() until the next pushed
+        # frame (measured 115 calls/s, 30 ms worst); prefetch re-serves the newest cached
+        # frame immediately, which is why record_floating_base.py de-dups by frame number.
+        vicon.set_stream_mode(pv.StreamMode.ClientPullPreFetch)
         vicon.enable_segment_data()
         for _ in range(300):
             if vicon.get_frame() == pv.Result.Success:
