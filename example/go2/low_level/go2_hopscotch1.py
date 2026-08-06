@@ -2,6 +2,8 @@ import time
 import sys
 import os
 import pickle
+import socket
+import struct
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -16,6 +18,11 @@ from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwi
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 
 import numpy as np
+
+# Wire format shared with record_floating_base.py --udp: magic, frame, t_send, xyz, quat4.
+MOCAP_UDP_PORT = 9870
+MOCAP_MAGIC = 0x56424731
+MOCAP_STRUCT = struct.Struct("<Iqdddddddd")
 
 
 def quat_mul(a, b):
@@ -179,13 +186,11 @@ class Custom:
         self.mocap_zero = None            # p_zero(3,) after calibration
         self.mocap_R = None               # 2x2 Rz(-yaw0) for the xy frame fit
         self.mocap_last_fnum = None
-        self.mocap_fake_fnum = 0
-        self.mocap_occluded = 0
-        self.mocap_call_max = 0.0
+        self.mocap_repeat = 0
         self.mocap_age_max = 0.0
+        self.mocap_drain_max = 0.0
         self.mocap_cal = []               # (t, fnum, p, q) collected during hold
         self.mocap_max_age = 0.1          # s; older than this mid-run -> damping fault
-        self.mocap_dt = 1.0 / 500.0
         self.p_meas = np.full(3, np.nan)
         self.p_raw = np.full(3, np.nan)
         self.mocap_age = np.nan
@@ -296,60 +301,64 @@ class Custom:
             time.sleep(1)
 
     def InitMocap(self):
-        """Connects to Vicon (ServerPush), caches the root segment, and times get_frame() before any motion."""
-        import pyvicon_datastream as pv
-        self.pv = pv
-        host, subject = "192.168.0.149", "go2"
-        self.mocap_subject = subject
-        vicon = pv.PyViconDatastream()
-        res = vicon.connect(host)
-        if isinstance(res, pv.Result) and res != pv.Result.Success:
-            raise SystemExit(f"ABORT: cannot connect to Vicon at {host} ({res})")
-        # Prefetch, not ServerPush: ServerPush blocks get_frame() until the next pushed
-        # frame (measured 115 calls/s, 30 ms worst); prefetch re-serves the newest cached
-        # frame immediately, which is why record_floating_base.py de-dups by frame number.
-        vicon.set_stream_mode(pv.StreamMode.ClientPullPreFetch)
-        vicon.enable_segment_data()
-        for _ in range(300):
-            if vicon.get_frame() == pv.Result.Success:
-                break
-            time.sleep(0.01)
-        else:
-            raise SystemExit(f"ABORT: connected to {host} but no frame in 3 s -- is Tracker streaming?")
-        try:
-            names = [str(vicon.get_subject_name(i)) for i in range(vicon.get_subject_count())]
-            if subject not in names:
-                raise SystemExit(f"ABORT: subject {subject!r} not in {names}")
-        except SystemExit:
-            raise
-        except Exception:
-            print("vicon subject enumeration unavailable; trusting subject name", flush=True)
-        seg = vicon.get_subject_root_segment_name(subject)
-        if not seg:
-            raise SystemExit(f"ABORT: no root segment for subject {subject!r}")
-        self.mocap_seg = seg
-        self.mocap_has_fnum = hasattr(vicon, "get_frame_number")
-        self.vicon = vicon
+        """Opens the bridge socket and confirms record_floating_base.py --udp is streaming.
 
-        # Startup probe: if get_frame() blocks under ServerPush, learn it here, not mid-jump.
-        calls, worst, t0 = 0, 0.0, time.perf_counter()
-        while time.perf_counter() - t0 < 1.0:
-            c0 = time.perf_counter()
-            vicon.get_frame()
-            worst = max(worst, time.perf_counter() - c0)
-            calls += 1
-        print(f"vicon: {subject}/{seg} at {host}, {calls} get_frame calls/s, "
-              f"worst {1e3 * worst:.2f} ms", flush=True)
-        if worst > 2e-3:
-            print(f"WARNING: get_frame() blocked up to {1e3 * worst:.1f} ms -- ServerPush is "
-                  "waiting on frames; consider a separate bridge process", flush=True)
+        This process never touches the Vicon SDK: get_frame() blocks ~9 ms per call in
+        every stream mode, which in-process starves the 100 Hz control thread via the GIL.
+        """
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("0.0.0.0", MOCAP_UDP_PORT))
+        self.sock.setblocking(False)
+        t0, seen = time.monotonic(), 0
+        while time.monotonic() - t0 < 3.0:
+            if self.DrainMocap() is not None:
+                seen += 1
+                if seen >= 5:
+                    break
+            time.sleep(1e-3)
+        if seen < 5:
+            raise SystemExit(
+                f"ABORT: no mocap datagrams on udp/{MOCAP_UDP_PORT} in 3 s -- start the "
+                "bridge first:  python record_floating_base.py --udp")
+        t0, n0 = time.monotonic(), 0
+        while time.monotonic() - t0 < 1.0:
+            if self.DrainMocap() is not None:
+                n0 += 1
+            time.sleep(2e-4)
+        s = self.mocap_sample
+        print(f"mocap bridge: udp/{MOCAP_UDP_PORT} live, {n0} frames/s, "
+              f"latest xyz {np.round(s[2], 4)}", flush=True)
+        if n0 < 60:
+            print(f"WARNING: only {n0} frames/s (expect ~120) -- check the bridge", flush=True)
+
+    def DrainMocap(self):
+        """Empties the socket, keeping the newest datagram. Non-blocking; measured 45 us median, 140 us worst."""
+        got = None
+        while True:
+            try:
+                buf = self.sock.recv(256)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError:
+                break
+            if len(buf) != MOCAP_STRUCT.size:
+                continue
+            f = MOCAP_STRUCT.unpack(buf)
+            if f[0] != MOCAP_MAGIC:
+                continue
+            got = f
+        if got is None:
+            return None
+        p = np.array(got[3:6])
+        if not np.isfinite(p).all():
+            return None
+        q = np.array(got[6:10])
+        # perf_counter throughout: ages are compared against this same clock downstream.
+        self.mocap_sample = (time.perf_counter(), int(got[1]), p, q)
+        return self.mocap_sample
 
     def Start(self):
-        if self.use_mocap:
-            self.mocapThreadPtr = RecurrentThread(
-                interval=self.mocap_dt, target=self.UpdateMocap, name="updatemocap"
-            )
-            self.mocapThreadPtr.Start()
         self.lowCmdWriteThreadPtr = RecurrentThread(
             interval=self.dt, target=self.LowCmdWrite, name="writebasiccmd"
         )
@@ -372,33 +381,6 @@ class Custom:
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
 
-    def UpdateMocap(self):
-        """200 Hz poll: de-dup by frame number, NaN-guard occlusion, publish one atomic tuple."""
-        c0 = time.perf_counter()
-        ok = self.vicon.get_frame() == self.pv.Result.Success
-        now = time.perf_counter()
-        self.mocap_call_max = max(self.mocap_call_max, now - c0)
-        if not ok:
-            return
-        if self.mocap_has_fnum:
-            fnum = int(self.vicon.get_frame_number())
-            if fnum == self.mocap_last_fnum:
-                return
-            self.mocap_last_fnum = fnum
-        else:
-            self.mocap_fake_fnum += 1
-            fnum = self.mocap_fake_fnum
-        pos = self.vicon.get_segment_global_translation(self.mocap_subject, self.mocap_seg)
-        rot = self.vicon.get_segment_global_quaternion(self.mocap_subject, self.mocap_seg)
-        p = None if pos is None else np.asarray(pos, float).ravel()[:3] * 1e-3
-        if p is not None and not np.any(p):
-            p = None
-        if p is None or not np.isfinite(p).all():
-            self.mocap_occluded += 1
-            return
-        q = None if rot is None else np.asarray(rot, float).ravel()[:4]
-        self.mocap_sample = (now, fnum, p, q)
-
     def _cal_append(self):
         s = self.mocap_sample
         if s is not None and (not self.mocap_cal or s[1] != self.mocap_cal[-1][1]):
@@ -413,7 +395,7 @@ class Custom:
         window = [s for s in recent if now - s[0] < 0.25]
         if len(recent) < 50 or len(window) < 12:
             print(f"MOCAP ABORT: flow too thin ({len(recent)}/1.0s, {len(window)}/0.25s, "
-                  f"occluded {self.mocap_occluded})", flush=True)
+                  f"repeats {self.mocap_repeat})", flush=True)
             return False
         self.mocap_zero = np.median(np.stack([s[2] for s in window]), axis=0)
         quats = [s[3] for s in window if s[3] is not None and np.isfinite(s[3]).all()]
@@ -438,7 +420,7 @@ class Custom:
         c, s = np.cos(eul[2]), np.sin(eul[2])
         self.mocap_R = np.array([[c, s], [-s, c]])
         print(f"mocap calibrated: zero {np.round(self.mocap_zero, 4)} yaw {deg[2]:+.2f} deg "
-              f"(quat {order}, {len(window)} samples, occluded {self.mocap_occluded})", flush=True)
+              f"(quat {order}, {len(window)} samples)", flush=True)
         return True
 
     def MocapPosition(self, now):
@@ -446,6 +428,9 @@ class Custom:
         s = self.mocap_sample
         if s is None or now - s[0] > self.mocap_max_age:
             return None
+        if s[1] == self.mocap_last_fnum:
+            self.mocap_repeat += 1
+        self.mocap_last_fnum = s[1]
         delta = s[2] - self.mocap_zero
         xy = self.mocap_R @ delta[:2]
         self.p_raw = s[2]
@@ -459,6 +444,10 @@ class Custom:
     def LowCmdWrite(self):
 
         now = time.perf_counter()
+        if self.use_mocap:
+            d0 = time.perf_counter()
+            self.DrainMocap()
+            self.mocap_drain_max = max(self.mocap_drain_max, time.perf_counter() - d0)
         if self.tick_prev is not None:
             dtick = now - self.tick_prev
             self.tick_sum += dtick
@@ -468,16 +457,17 @@ class Custom:
                 self.log_align.append(dtick)
             self.n_tick += 1
             if self.n_tick % 200 == 0:
-                mtail = (f" | mocap call max {1e3 * self.mocap_call_max:.2f} "
+                mtail = (f" | mocap drain max {1e3 * self.mocap_drain_max:.3f} "
                          f"age max {1e3 * self.mocap_age_max:.1f} ms "
-                         f"occl {self.mocap_occluded}" if self.use_mocap else "")
+                         f"repeat {self.mocap_repeat}" if self.use_mocap else "")
                 print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
                       f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms | "
                       f"sat {self.sat_cnt}/200 peak {self.sat_peak:.2f}x{mtail}", flush=True)
                 self.tick_sum = self.tick_max = self.inf_sum = self.inf_max = 0.0
                 self.sat_peak = 0.0
                 self.sat_cnt = 0
-                self.mocap_call_max = self.mocap_age_max = 0.0
+                self.mocap_drain_max = self.mocap_age_max = 0.0
+                self.mocap_repeat = 0
         self.tick_prev = now
 
         if self.low_state is None:

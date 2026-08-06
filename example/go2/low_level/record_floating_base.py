@@ -1,9 +1,17 @@
-"""Vicon floating-base recorder for Go2 hopscotch runs.
+"""Vicon floating-base recorder and live UDP bridge for Go2 hopscotch runs.
 
 Streams the Go2 subject's root-segment pose off the Vicon datastream and writes an
 npz that plot_base_pos.py syncs against a deploy_meta.py run trace. This is the ONLY
 ground-truth base measurement in the loop -- deploy_meta's `odom_xy` is velest
 odometry (dead-reckoned, xy only) and its z is not observed at all.
+
+With --udp it ALSO forwards every fresh frame as a datagram to go2_hopscotch1.py.
+That process must never call into this SDK itself: get_frame() blocks ~9 ms per call
+(measured 109-115 calls/s against a 120 Hz camera) whichever stream mode is set, and
+in-process that starves the 100 Hz control thread through the GIL. Here the block is
+harmless -- separate process, separate GIL -- and the controller only ever does a
+non-blocking recvfrom. One run of this script does both jobs: live feed + full-rate
+recording that is frame-number aligned with what the controller consumed.
 
 WHAT CHANGED FROM THE Go1 VERSION (each one silently corrupted a Go2 record):
 
@@ -32,6 +40,8 @@ Usage:
 """
 import argparse
 import os
+import socket
+import struct
 import sys
 import threading
 import time
@@ -45,6 +55,11 @@ DEFAULT_HOST = "192.168.0.149"
 DEFAULT_SUBJECT = "go2"
 MM_TO_M = 1e-3
 POLL_SLEEP = 5e-4                # idle-poll pacing; see the de-dup block in main()
+# Wire format shared with go2_hopscotch1.py: magic, frame no., monotonic send stamp,
+# xyz metres, quaternion as Tracker delivers it (the consumer resolves the ordering).
+UDP_MAGIC = 0x56424731
+UDP_STRUCT = struct.Struct("<Iqdddddddd")   # magic, frame, t_send, xyz, quat4 -> 76 B
+DEFAULT_UDP = "127.0.0.1:9870"
 
 
 stop_flag = False
@@ -74,7 +89,18 @@ def main():
     ap.add_argument("--duration", type=float, default=None,
                     help="auto-stop after this many seconds (default: run until Enter)")
     ap.add_argument("--no-plot", action="store_true", help="skip the quicklook png")
+    ap.add_argument("--udp", nargs="?", const=DEFAULT_UDP, default=None,
+                    metavar="HOST:PORT",
+                    help=f"also forward each frame live to the controller (default {DEFAULT_UDP})")
     args = ap.parse_args()
+
+    sock = udp_addr = None
+    if args.udp:
+        host_s, _, port_s = args.udp.rpartition(":")
+        udp_addr = (host_s or "127.0.0.1", int(port_s))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        print(f"udp bridge -> {udp_addr[0]}:{udp_addr[1]}")
 
     vicon = pv.PyViconDatastream()
     # connect() returns Result on some wrapper builds and None/bool on others, so an
@@ -110,7 +136,7 @@ def main():
     print(f"recording {args.subject}/{seg} from {args.host}")
 
     t_arr, iso_arr, pos_arr, quat_arr, fnum_arr = [], [], [], [], []
-    n_occluded = n_gap = 0
+    n_occluded = n_gap = n_sent = n_send_err = 0
     last_fnum = None
     has_fnum = hasattr(vicon, "get_frame_number")
 
@@ -167,6 +193,17 @@ def main():
             if np.isnan(p).any():
                 n_occluded += 1
 
+            # Forward before appending: the live consumer is latency-critical, the
+            # recording is not. Occluded frames are recorded but never sent.
+            if sock is not None and not np.isnan(p).any():
+                qs = np.where(np.isfinite(q), q, 0.0)
+                try:
+                    sock.sendto(UDP_STRUCT.pack(UDP_MAGIC, int(fnum),
+                                                time.monotonic(), *p, *qs), udp_addr)
+                    n_sent += 1
+                except OSError:
+                    n_send_err += 1
+
             t_arr.append(now)
             iso_arr.append(datetime.fromtimestamp(now, tz=timezone.utc)
                            .astimezone().isoformat())
@@ -175,8 +212,11 @@ def main():
             fnum_arr.append(fnum)
 
             if len(t_arr) % 200 == 0:
-                print(f"[{now - t_start:6.2f}s] n={len(t_arr):6d}  "
-                      f"xyz {np.round(p, 4)}  occluded {n_occluded}")
+                rate = len(t_arr) / max(now - t_start, 1e-9)
+                print(f"[{now - t_start:6.2f}s] n={len(t_arr):6d} {rate:5.1f} Hz  "
+                      f"xyz {np.round(p, 4)}  occluded {n_occluded}"
+                      + (f"  sent {n_sent}" + (f" ERR {n_send_err}" if n_send_err else "")
+                         if sock is not None else ""))
     except KeyboardInterrupt:
         print("\nCtrl-C -- saving what was captured")
     finally:
