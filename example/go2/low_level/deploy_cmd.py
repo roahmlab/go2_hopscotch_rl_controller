@@ -62,7 +62,8 @@ def mdc_envelope_v(tau_des, qd, vbat, pbat):
 
 class CustomCmd(Custom):
     def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0,
-                 meta_path=None, vbat_eff=None):
+                 meta_path=None, vbat_eff=None, clamp_pushoff_s=0.15,
+                 clamp_uniform=False):
         super().__init__(ckpt_path, meta, traj_override, resid_scale=resid_scale,
                          meta_path=meta_path)
         # ---- Vbat_eff software derate (target shaping) -------------------------
@@ -94,6 +95,35 @@ class CustomCmd(Custom):
         self.PBAT_EFF = None if vbat_eff is None else 60.0 * vbat_eff
         self._clamp_ticks = 0
         self._clamp_max_nm = 0.0
+        # PHASE GATE (2026-08-07 HW: always-on clamp destabilized the diagonal --
+        # the pbat term uniformly attenuates whole-body balance corrections and the
+        # 50 Hz-stale shaping wobbles high-qd stabilization). Clamp ONLY inside the
+        # pre-takeoff windows (last clamp_pushoff_s of any stance before a flight
+        # onset -- where the overshoot impulse is written; the A2 mask geometry),
+        # full authority everywhere else. 0 = clamp everywhere (the first-trial
+        # behavior). clamp_uniform: within the window, scale the WHOLE torque
+        # vector by min(env_i/|tau_i|) instead of per-joint clipping -- preserves
+        # the launch force pattern (no manufactured couples / tilted takeoffs) at
+        # the cost of deviating from the trained per-joint MDC semantics.
+        self.CLAMP_PUSHOFF_S = float(clamp_pushoff_s)
+        self.CLAMP_UNIFORM = bool(clamp_uniform)
+        if vbat_eff is not None:
+            air = np.asarray(self.ref.airborne, bool)
+            rdt = float(getattr(self.ref, "dt", 0.001))
+            idx = np.arange(len(air))
+            nxt = np.where(air, idx, 10 * len(air))
+            nxt = np.minimum.accumulate(nxt[::-1])[::-1]
+            ttf = (nxt - idx) * rdt              # sentinel-huge after last flight
+            if self.CLAMP_PUSHOFF_S > 0.0:
+                self._clamp_gate = (~air) & (ttf <= self.CLAMP_PUSHOFF_S)
+            else:
+                self._clamp_gate = np.ones(len(air), bool)
+            logging.info("VBAT_EFF gate: %s, %s clipping",
+                         (f"pre-takeoff {self.CLAMP_PUSHOFF_S:.2f}s windows "
+                          f"({int(self._clamp_gate.sum())}/{len(air)} knots)"
+                          if self.CLAMP_PUSHOFF_S > 0 else "ALWAYS-ON"),
+                         "uniform (direction-preserving)" if self.CLAMP_UNIFORM
+                         else "per-joint (train-MDC)")
         mode = meta.get("obs_tau_mode", "mdc")
         if mode not in ("cmd", "zero"):
             raise SystemExit(
@@ -240,14 +270,22 @@ class CustomCmd(Custom):
         # channel sees the SHAPED command = what the plant actually received.
         self._clamp_last = 0.0
         if self.VBAT_EFF is not None:
-            tau_hat = self.KP * (q_target - q) + self.KD * (qd_ref_t - qd) + tau_ff_t
-            tau_lim = mdc_envelope_v(tau_hat, qd, self.VBAT_EFF, self.PBAT_EFF)
-            over = tau_hat - tau_lim              # signed; 0 where inside
-            if np.any(np.abs(over) > 1e-9):
-                q_target = q_target - over / self.KP
-                self._clamp_ticks += 1
-                self._clamp_last = float(np.abs(over).max())
-                self._clamp_max_nm = max(self._clamp_max_nm, self._clamp_last)
+            i0 = min(int(round(t / float(getattr(self.ref, "dt", 0.001)))),
+                     len(self._clamp_gate) - 1)
+            if self._clamp_gate[i0]:
+                tau_hat = self.KP * (q_target - q) + self.KD * (qd_ref_t - qd) + tau_ff_t
+                tau_lim = mdc_envelope_v(tau_hat, qd, self.VBAT_EFF, self.PBAT_EFF)
+                if self.CLAMP_UNIFORM:
+                    ratio = np.abs(tau_lim) / np.maximum(np.abs(tau_hat), 1e-9)
+                    s = float(np.clip(ratio.min(), 0.0, 1.0))
+                    over = (1.0 - s) * tau_hat    # whole-vector, pattern-preserving
+                else:
+                    over = tau_hat - tau_lim      # per-joint (train-MDC semantics)
+                if np.any(np.abs(over) > 1e-9):
+                    q_target = q_target - over / self.KP
+                    self._clamp_ticks += 1
+                    self._clamp_last = float(np.abs(over).max())
+                    self._clamp_max_nm = max(self._clamp_max_nm, self._clamp_last)
 
         fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
         for i in range(12):
@@ -376,6 +414,16 @@ if __name__ == '__main__':
                          "deterministic champion-day (sagged-pack) plant. Training DR "
                          "drew Vbat 25.0-28.8, so 25-27 is in-distribution; start at "
                          "27 and walk down. None = off.")
+    ap.add_argument("--clamp_pushoff_s", type=float, default=0.15,
+                    help="vbat_eff derate phase gate: clamp only in the last N s of "
+                         "any stance before a flight onset (the impulse-writing "
+                         "windows; A2 mask geometry). 0 = clamp everywhere "
+                         "(destabilized the diagonal on HW 2026-08-07).")
+    ap.add_argument("--clamp_uniform", action="store_true",
+                    help="within the gate, scale the whole torque vector uniformly "
+                         "(min env ratio) instead of per-joint clipping -- preserves "
+                         "the launch force pattern (anti-tilted-takeoff), deviates "
+                         "from trained per-joint MDC semantics.")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
     ap.add_argument("--out", default="data",
@@ -389,7 +437,9 @@ if __name__ == '__main__':
     if args.dry_run:
         logging.info("--dry-run: constructing controller (no DDS, no motion)...")
         c = CustomCmd(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                      meta_path=meta_path, vbat_eff=args.vbat_eff)
+                      meta_path=meta_path, vbat_eff=args.vbat_eff,
+                      clamp_pushoff_s=args.clamp_pushoff_s,
+                      clamp_uniform=args.clamp_uniform)
         logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s tau_mode=%s vbat_eff=%s",
                      c.n_obs, c.n_ticks, c.blind, c.TAU_MODE, c.VBAT_EFF)
         sys.exit(0)
@@ -403,7 +453,9 @@ if __name__ == '__main__':
         ChannelFactoryInitialize(0)
 
     custom = CustomCmd(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                       meta_path=meta_path, vbat_eff=args.vbat_eff)
+                       meta_path=meta_path, vbat_eff=args.vbat_eff,
+                       clamp_pushoff_s=args.clamp_pushoff_s,
+                       clamp_uniform=args.clamp_uniform)
     custom.Init()
     custom.Start()
 
