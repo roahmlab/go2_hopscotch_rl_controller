@@ -1,0 +1,5 @@
+electrical summary (never enters the obs):
+  bus V   start 31.58  end 31.38  min 28.91 (sag 2.67)  [model-Vbat DR ceiling 28.8 -- see day-effect arc]
+  bus A   mean 8.7  peak 68.1
+  BMS SOC start 84%  end 84%
+  motor T start max 29C  end max 29C  worst rise +1C

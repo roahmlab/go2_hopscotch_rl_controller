@@ -287,11 +287,11 @@ if __name__ == '__main__':
     import argparse
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/AtauCmd_800.pt")
-    ap.add_argument("--meta", default=None, help="default: meta.json beside the checkpoint")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/a2cmd_400.pt")
+    ap.add_argument("--meta", default="hopscotch_utils/a2cmd_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json",
                     help="override meta's traj_path")
-    ap.add_argument("--resid_scale", type=float, default=1.0,
+    ap.add_argument("--resid_scale", type=float, default=1,
                     help="residual authority attenuation. NOTE: unlike the pz3 "
                          "family, wall-family ckpts are NOT blanket-0.75x -- Afree/"
                          "AtauCmd sim picks are full-auth; check the run's eval "
