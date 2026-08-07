@@ -689,7 +689,7 @@ class Custom:
         self.trace = {k: [] for k in
                       ("t", "rpy", "rpy_ref", "ori_err", "odom_xy", "ref_xy", "vhat",
                        "tilt", "action", "contacts", "forces", "q", "qd", "q_target",
-                       "tau_applied")}
+                       "tau_applied", "tau_p", "tau_d", "tau_ff", "tau_cmd")}
         # Every artifact this run writes is named for the four things that decide what
         # the robot actually did: which weights, which contract, how much residual
         # authority they were given, and which reference they tracked. A png named for
@@ -699,6 +699,19 @@ class Custom:
                                  _stem(meta_path) if meta_path else "nometa",
                                  f"r{self.RESID_SCALE:.2f}".replace(".", "p"),
                                  _stem(traj)])
+
+
+        # ---- high-rate measured-torque log (DDS callback thread) ----------------
+        # rt/lowstate publishes far faster than this 50 Hz control loop, so tau_est is
+        # buffered straight out of the subscriber callback rather than sampled in
+        # _policy_tick: a touchdown torque spike lasts a few ms and the 20 ms tick
+        # would alias it away entirely. Plain list appends only -- this runs on the DDS
+        # reader thread and must never block it. Armed at handoff, disarmed at settle.
+        self.hf_on = False
+        self.hf_t0 = 0.0
+        self.hf_t = []
+        self.hf_tau = []
+        self.HF_MAX = 400000                  # runaway guard (~13 min at 500 Hz)
 
 
         # measured loop-rate meter (should read ~50 Hz)
@@ -758,6 +771,11 @@ class Custom:
 
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
+        if self.hf_on and len(self.hf_t) < self.HF_MAX:
+            # ISO order, to match every other 12-vector this script writes.
+            ms = msg.motor_state
+            self.hf_t.append(time.perf_counter() - self.hf_t0)
+            self.hf_tau.append([ms[m].tau_est for m in MOTOR_FROM_ISO])
 
 
     # ------------------------------------------------------------ obs pieces
@@ -798,6 +816,8 @@ class Custom:
         d_yaw = yaw_ref0 - yaw_from_quat_wxyz(self._imu_quat())
         self.q_align = quat_about_z(d_yaw)
         self.handoff_done = True
+        self.hf_t0 = time.perf_counter()      # t=0 of the high-rate log == t=0 of the
+        self.hf_on = True                     # 50 Hz trace: both start at this tick
         logging.info("HANDOFF: policy takes over (yaw align %+.1f deg)", np.degrees(d_yaw))
 
 
@@ -813,11 +833,26 @@ class Custom:
         contacts_obs = np.zeros(4) if self.blind else contacts_true
 
 
+        # The three terms the robot's motor controller sums, kept separately because
+        # "the torque we commanded" is ambiguous otherwise: tau_cmd is what PD+FF asks
+        # for, tau_applied is what survives the MDC voltage/power envelope, and the gap
+        # between them is authority the plant refused to give. Note these use
+        # held_targets (LAST tick's command) against THIS tick's q/qd -- that is the
+        # 1-step actuation latency the policy was trained with, so recomputing this
+        # offline from q/q_target without the shift would not reproduce it.
         if self.held_targets is None:
+            tau_p = np.zeros(12)
+            tau_d = np.zeros(12)
+            tau_ff_h = np.zeros(12)
+            tau_cmd = np.zeros(12)
             tau_applied = np.zeros(12)
         else:
             qt, qdt, tff = self.held_targets
-            tau_applied = mdc_apply(self.KP * (qt - q) + self.KD * (qdt - qd) + tff, qd)
+            tau_p = self.KP * (qt - q)
+            tau_d = self.KD * (qdt - qd)
+            tau_ff_h = tff
+            tau_cmd = tau_p + tau_d + tff
+            tau_applied = mdc_apply(tau_cmd, qd)
 
 
         frame = np.concatenate([self.prev_measured, contacts_obs, tau_applied])
@@ -915,6 +950,10 @@ class Custom:
         tr["qd"].append(qd.copy())
         tr["q_target"].append(q_target.copy())
         tr["tau_applied"].append(tau_applied.copy())
+        tr["tau_p"].append(tau_p.copy())
+        tr["tau_d"].append(tau_d.copy())
+        tr["tau_ff"].append(tau_ff_h.copy())
+        tr["tau_cmd"].append(tau_cmd.copy())
 
 
         if self.motiontime % 10 == 0:
@@ -1081,6 +1120,36 @@ class Custom:
                  force_ref=fref, contact_plan=plan, q_ref=qref, qd_ref=qdref, **T)
 
 
+        # ---- torque artifacts, written as their own npz pair --------------------
+        # Two DIFFERENT quantities on two DIFFERENT clocks, deliberately not merged:
+        #   commanded -- 50 Hz, what this script asked the motors for (PD + ff)
+        #   measured  -- native lowstate rate, what the motors report back (tau_est)
+        # Kept separate because resampling either onto the other's clock would destroy
+        # the thing each is for (the transients, and the exact per-tick command).
+        np.savez(stem + "_torque_commanded.npz",
+                 t=t, tau_p=T["tau_p"], tau_d=T["tau_d"], tau_ff=T["tau_ff"],
+                 tau_cmd=T["tau_cmd"], tau_applied=T["tau_applied"],
+                 tau_max=TAU_MAX_ISO, kp=self.KP, kd=self.KD, rate=1.0 / self.dt,
+                 joint_names=np.array(ISO_NAMES), run_tag=self.run_tag)
+
+
+        n_hf = min(len(self.hf_t), len(self.hf_tau))   # a callback can land mid-append
+        hf_t = np.asarray(self.hf_t[:n_hf], float)
+        hf_tau = np.asarray(self.hf_tau[:n_hf], float)
+        hf_rate = float("nan")
+        if n_hf > 2:
+            hf_rate = (n_hf - 1) / (hf_t[-1] - hf_t[0])
+            np.savez(stem + "_torque_measured.npz",
+                     t=hf_t, tau_est=hf_tau, tau_max=TAU_MAX_ISO, rate=hf_rate,
+                     joint_names=np.array(ISO_NAMES), run_tag=self.run_tag)
+            logging.info("measured-torque log: %d samples @ %.1f Hz (%.1fx the "
+                         "control rate), |tau_est| max %.1f N.m",
+                         n_hf, hf_rate, hf_rate * self.dt, np.abs(hf_tau).max())
+        else:
+            logging.warning("no high-rate torque samples captured (%d) -- was the "
+                            "policy phase reached?", n_hf)
+
+
         # ---- plot (lazy import: a headless robot may not have matplotlib) ----
         try:
             import matplotlib
@@ -1226,8 +1295,76 @@ class Custom:
             plt.close(fig)
 
 
-        logging.info("trace written: %s/  (png, _contact.png, _joint_pos.png, "
-                     "_joint_vel.png, npz, txt)", rundir)
+        # ---- commanded-torque PNG: what we asked the motors for -----------------
+        # tau_ff is the trajopt feedforward, tau_cmd adds the PD feedback on top, and
+        # tau_applied is tau_cmd after the MDC envelope. Where blue departs from green
+        # the motor model refused the request -- that is a saturation event, and it is
+        # invisible if you only ever plot one of the three.
+        fig, ax = plt.subplots(4, 3, figsize=(15, 11), sharex=True)
+        for li, leg in enumerate(FOOT_NAMES):
+            for pi, part in enumerate(("hip", "thigh", "calf")):
+                a = ax[li][pi]
+                j = pi * 4 + li
+                for s0, s1 in spans:
+                    a.axvspan(s0, s1, color="0.88", lw=0, zorder=0)
+                a.plot(t, T["tau_ff"][:, j], "--", c="0.45", lw=1.2, label="tau_ff")
+                a.plot(t, T["tau_cmd"][:, j], c="C2", lw=1.0, alpha=0.9,
+                       label="tau_cmd = ff + PD")
+                a.plot(t, T["tau_applied"][:, j], c="C0", lw=1.4,
+                       label="tau_applied (post-MDC)")
+                for sgn in (1.0, -1.0):
+                    a.axhline(sgn * TAU_MAX_ISO[j], ls=":", c="r", lw=1.0,
+                              label="tau_max" if (sgn > 0 and j == 0) else None)
+                sat = np.abs(T["tau_cmd"][:, j] - T["tau_applied"][:, j]) > 1e-6
+                a.set_title(f"{leg}_{part}   |cmd|max {np.abs(T['tau_cmd'][:, j]).max():.1f}"
+                            f"   MDC-limited {100 * sat.mean():.1f}%",
+                            fontsize=8, loc="left")
+                if li == 3:
+                    a.set_xlabel("t [s]  (shaded = planned flight)")
+                if pi == 0:
+                    a.set_ylabel("[N.m]")
+        ax[0][0].legend(fontsize=7, loc="best")
+        fig.suptitle(f"{self.run_tag}\ncommanded torque -- computed here as "
+                     f"tau_ff + kp*(q_target-q) + kd*(qd_ref-qd), kp={self.KP:g} "
+                     f"kd={self.KD:g}", fontsize=9)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.savefig(stem + "_torque_commanded.png", dpi=130)
+        plt.close(fig)
+
+
+        # ---- measured-torque PNG: what the motors report back -------------------
+        if n_hf > 2:
+            fig, ax = plt.subplots(4, 3, figsize=(15, 11), sharex=True)
+            for li, leg in enumerate(FOOT_NAMES):
+                for pi, part in enumerate(("hip", "thigh", "calf")):
+                    a = ax[li][pi]
+                    j = pi * 4 + li
+                    for s0, s1 in spans:
+                        a.axvspan(s0, s1, color="0.88", lw=0, zorder=0)
+                    a.plot(hf_t, hf_tau[:, j], c="C3", lw=0.8)
+                    for sgn in (1.0, -1.0):
+                        a.axhline(sgn * TAU_MAX_ISO[j], ls=":", c="r", lw=1.0)
+                    a.set_title(f"{leg}_{part}   |tau_est| max "
+                                f"{np.abs(hf_tau[:, j]).max():.1f}   RMS "
+                                f"{np.sqrt((hf_tau[:, j] ** 2).mean()):.1f} N.m",
+                                fontsize=8, loc="left")
+                    if li == 3:
+                        a.set_xlabel("t [s]  (shaded = planned flight)")
+                    if pi == 0:
+                        a.set_ylabel("[N.m]")
+            fig.suptitle(f"{self.run_tag}\nmeasured torque (motor_state.tau_est) -- "
+                         f"{n_hf} samples @ {hf_rate:.0f} Hz, "
+                         f"{hf_rate * self.dt:.0f}x the control rate", fontsize=9)
+            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            fig.savefig(stem + "_torque_measured.png", dpi=130)
+            plt.close(fig)
+
+
+        wrote = ["npz", "txt", "png", "_contact.png", "_joint_pos.png", "_joint_vel.png",
+                 "_torque_commanded.{png,npz}"]
+        if n_hf > 2:
+            wrote.append("_torque_measured.{png,npz}")
+        logging.info("trace written: %s/  (%s)", rundir, ", ".join(wrote))
         logging.info("  -> copy the Vicon record into that directory, then: "
                      "python3 plot_base_pos.py --dir %s", rundir)
         return stem
@@ -1281,6 +1418,7 @@ class Custom:
 
 
         if self.aborted:
+            self.hf_on = False
             self._damped_stop()
 
 
@@ -1345,6 +1483,7 @@ class Custom:
 
 
         elif self.settle_percent < 1:
+            self.hf_on = False                # policy phase over: stop the torque log
             self.settle_percent = min(self.settle_percent + 1.0 / self.settle_duration, 1)
             for m in range(12):
                 self.low_cmd.motor_cmd[m].q = float(self.qf_motor[m])
@@ -1362,7 +1501,7 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/runA_750.pt")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/runA_650.pt")
     ap.add_argument("--meta", default="hopscotch_utils/runA_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
     ap.add_argument("--resid_scale", type=float, default=0.75,
@@ -1393,9 +1532,9 @@ if __name__ == '__main__':
         logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s ff_d=%s ff_Ia=%s",
                      c.n_obs, c.n_ticks, c.blind,
                      meta.get("ff_damping_comp"), meta.get("ff_armature_comp"))
-        logging.info("artifacts would land in: %s/%s_<stamp>/ "
-                     "(png, _contact.png, _joint_pos.png, _joint_vel.png, npz, txt)",
-                     args.out, c.run_tag)
+        logging.info("artifacts would land in: %s/%s_<stamp>/ (png, _contact.png, "
+                     "_joint_pos.png, _joint_vel.png, _torque_commanded.{png,npz}, "
+                     "_torque_measured.{png,npz}, npz, txt)", args.out, c.run_tag)
         sys.exit(0)
 
 

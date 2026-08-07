@@ -1,0 +1,39 @@
+run          : runA2_600_runA2_meta_r0p75_traj_hopscotch_friction_6cm_lsq
+checkpoint   : hopscotch_utils/runA2_600.pt
+meta         : hopscotch_utils/runA2_meta.json
+reference    : hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json
+resid auth   : 0.75x
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     8.47°    23.64°    1.62°
+  pitch     5.57°    14.41°   -5.81°
+    yaw     8.02°    23.40°   -3.10°
+ odom x    0.063m    0.113m   0.074m
+ odom y    0.050m    0.089m  -0.080m
+
+worst tilt (grav_z) : -0.826   (abort at > -0.40)
+|action| mean/max   : 0.294 / 1.000
+action saturation   : 2.8% of joint-ticks
+resid authority     : 0.75x (effective scale 0.150 rad)
+jitter (mrad/tick)  : 17.2
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.40s      ?    +40    +40    +60
+  touchdown   0.70s    n/a   +100    +80   +100
+    takeoff   1.10s      ?    +40    +40    +60
+  touchdown   1.40s    n/a      -      -   +140
+    takeoff   1.90s      ?      -      -    +80
+  touchdown   2.20s      -   +100     +0      -
+    takeoff   2.70s      -    +60    +60      -
+  touchdown   3.00s    n/a    +80     +0     +0
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |resid|  max|resid|  |qd-ref|
+    hip    0.0729    0.0566    0.0646      0.1500     1.157
+  thigh    0.0872    0.0804    0.0481      0.1500     1.954
+   calf    0.1360    0.1311    0.0595      0.1500     3.054
+    all    0.1024    0.0946    0.0578      0.1500     2.197
+worst-tracked joint : FL_thigh_joint (max |q-cmd| 0.5289 rad)
