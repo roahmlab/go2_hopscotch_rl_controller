@@ -42,14 +42,58 @@ import numpy as np
 from deploy_meta import (Custom, load_meta, mdc_apply, qmul, quat_about_z,
                          quat_to_euler_xyz, rotmat_from_quat_wxyz,
                          yaw_from_quat_wxyz, _wrap_pi, MOTOR_FROM_ISO,
-                         CONTACT_FORCE_THRESHOLD_HW, BODY_WEIGHT)
+                         CONTACT_FORCE_THRESHOLD_HW, BODY_WEIGHT,
+                         MDC_ALPHA, MDC_BETA, MDC_R, MDC_KT, MDC_GR,
+                         MDC_VBAT, TAU_MAX_ISO)
+
+
+def mdc_envelope_v(tau_des, qd, vbat, pbat):
+    """deploy_meta.mdc_apply at an explicit (vbat, pbat) instead of the pinned
+    module constants -- the Vbat_eff software derate's envelope."""
+    V = np.clip(MDC_ALPHA * tau_des + MDC_BETA * qd, -vbat, vbat)
+    tau_v = (V - MDC_BETA * qd) / MDC_ALPHA
+    A = float(np.sum(MDC_R * tau_v * tau_v / (MDC_KT * MDC_GR) ** 2))
+    B = float(np.sum(tau_v * qd))
+    if A + B > pbat:
+        eta = 2.0 * pbat / (B + np.sqrt(B * B + 4.0 * A * pbat) + 1e-8)
+        tau_v = tau_v * np.clip(eta, 0.0, 1.0)
+    return np.clip(np.nan_to_num(tau_v), -TAU_MAX_ISO, TAU_MAX_ISO)
 
 
 class CustomCmd(Custom):
     def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0,
-                 meta_path=None):
+                 meta_path=None, vbat_eff=None):
         super().__init__(ckpt_path, meta, traj_override, resid_scale=resid_scale,
                          meta_path=meta_path)
+        # ---- Vbat_eff software derate (target shaping) -------------------------
+        # The firmware PD runs at 1 kHz internally -- there is no hook between it
+        # and the motors, so the derate PRE-SHAPES the commanded excursion: where
+        # the implied torque kp(q*-q)+kd(qd*-qd)+tau_ff exceeds the MDC envelope
+        # at (Vbat_eff, 60A*Vbat_eff), the position target is pulled in by the
+        # excess/kp. Effect: delivered torque capped to a WEAK-PACK envelope at
+        # push-off speeds (the only place the V-line binds); stance/landing
+        # torques at low qd sit under the box limits and are untouched, and the
+        # residual keeps full authority (this is the impulse cut WITHOUT the
+        # stabilization cut that 0.75x attenuation was). In-distribution: train
+        # DR drew Vbat down to 25.0. The champion day (2026-08-05, sagged pack)
+        # is the existence proof. None = off.
+        if vbat_eff is not None:
+            if not 22.0 <= vbat_eff <= 30.0:
+                raise SystemExit(f"ABORT: --vbat_eff {vbat_eff} outside sanity "
+                                 f"range [22, 30] V")
+            if vbat_eff >= MDC_VBAT:
+                logging.warning("vbat_eff %.1f >= trained ceiling %.1f -- the "
+                                "clamp will rarely bind (near no-op)",
+                                vbat_eff, MDC_VBAT)
+            logging.info("VBAT_EFF DERATE ACTIVE: %.1f V (pbat %.0f W) -- "
+                         "envelope at qd=10: %.1f N*m (28.8V: %.1f)",
+                         vbat_eff, 60.0 * vbat_eff,
+                         max(0.0, (vbat_eff - MDC_BETA * 10.0) / MDC_ALPHA),
+                         (MDC_VBAT - MDC_BETA * 10.0) / MDC_ALPHA)
+        self.VBAT_EFF = vbat_eff
+        self.PBAT_EFF = None if vbat_eff is None else 60.0 * vbat_eff
+        self._clamp_ticks = 0
+        self._clamp_max_nm = 0.0
         mode = meta.get("obs_tau_mode", "mdc")
         if mode not in ("cmd", "zero"):
             raise SystemExit(
@@ -65,7 +109,8 @@ class CustomCmd(Custom):
         # electrical logs -- separate from self.trace so the parent's save_trace
         # npz schema stays byte-identical to deploy_meta's.
         self.hf_v = []                        # 500 Hz: (t, power_v, power_a)
-        self.elec50 = {k: [] for k in ("t", "v", "a", "soc", "temp")}
+        self.elec50 = {k: [] for k in ("t", "v", "a", "soc", "temp", "clamp")}
+        self._clamp_last = 0.0
 
     # ------------------------------------------------------------ electrical
     @staticmethod
@@ -96,6 +141,7 @@ class CustomCmd(Custom):
         e = self.elec50
         e["t"].append(t); e["v"].append(v); e["a"].append(a)
         e["soc"].append(soc); e["temp"].append(temp)
+        e["clamp"].append(self._clamp_last)   # max |excess torque| shaped away (N*m)
 
     # ------------------------------------------------------------ policy tick
     # Copied from deploy_meta.Custom._policy_tick (2026-08-06 state); the marked
@@ -185,6 +231,24 @@ class CustomCmd(Custom):
         q_ref_t, qd_ref_t, tau_ff_t = self.ref.ref_at(t)
         q_target = q_ref_t + self.ACTION_SCALE * self.RESID_SCALE * a_cmd
 
+        # ---- Vbat_eff derate: shape the target so the firmware's implied torque
+        # stays inside the weak-pack envelope. Fresh q/qd = best estimate of the
+        # state the 1 kHz PD will act on this tick (approximation: qd evolves over
+        # the 20 ms hold; the envelope binds only at push-off instants). tau_ff is
+        # left as commanded -- the position pull-in absorbs the total excess since
+        # the firmware sums the terms. Runs BEFORE held_targets, so the cmd-obs
+        # channel sees the SHAPED command = what the plant actually received.
+        self._clamp_last = 0.0
+        if self.VBAT_EFF is not None:
+            tau_hat = self.KP * (q_target - q) + self.KD * (qd_ref_t - qd) + tau_ff_t
+            tau_lim = mdc_envelope_v(tau_hat, qd, self.VBAT_EFF, self.PBAT_EFF)
+            over = tau_hat - tau_lim              # signed; 0 where inside
+            if np.any(np.abs(over) > 1e-9):
+                q_target = q_target - over / self.KP
+                self._clamp_ticks += 1
+                self._clamp_last = float(np.abs(over).max())
+                self._clamp_max_nm = max(self._clamp_max_nm, self._clamp_last)
+
         fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
         for i in range(12):
             m = MOTOR_FROM_ISO[i]
@@ -254,10 +318,12 @@ class CustomCmd(Custom):
         e = {k: np.asarray(v, float) for k, v in self.elec50.items()}
         path = os.path.join(rundir, f"{os.path.basename(rundir)}_electrical.npz")
         np.savez(path, t50=e["t"], v50=e["v"], a50=e["a"], soc50=e["soc"],
-                 temp50=e["temp"], t500=hf[:, 0] if len(hf) else np.zeros(0),
+                 temp50=e["temp"], clamp50=e["clamp"],
+                 t500=hf[:, 0] if len(hf) else np.zeros(0),
                  v500=hf[:, 1] if len(hf) else np.zeros(0),
                  a500=hf[:, 2] if len(hf) else np.zeros(0),
-                 tau_obs_mode=self.TAU_MODE)
+                 tau_obs_mode=self.TAU_MODE,
+                 vbat_eff=(self.VBAT_EFF if self.VBAT_EFF is not None else 0.0))
         v, a, soc, temp = e["v"], e["a"], e["soc"], e["temp"]
         vv = v[np.isfinite(v)]
         aa = a[np.isfinite(a)]
@@ -276,6 +342,12 @@ class CustomCmd(Custom):
             rise = tt[-1] - tt[0]
             lines.append(f"  motor T start max {tt[0].max():.0f}C  end max "
                          f"{tt[-1].max():.0f}C  worst rise {rise.max():+.0f}C")
+        if self.VBAT_EFF is not None:
+            n = len(e["t"])
+            lines.append(f"  VBAT_EFF {self.VBAT_EFF:.1f}V derate: clamped "
+                         f"{self._clamp_ticks}/{n} ticks "
+                         f"({100.0 * self._clamp_ticks / max(n, 1):.0f}%), max "
+                         f"excess shaped away {self._clamp_max_nm:.1f} N*m")
         for ln in lines:
             logging.info(ln)
         with open(os.path.join(rundir, "electrical.txt"), "w") as f:
@@ -296,6 +368,14 @@ if __name__ == '__main__':
                          "family, wall-family ckpts are NOT blanket-0.75x -- Afree/"
                          "AtauCmd sim picks are full-auth; check the run's eval "
                          "ledger before attenuating (2026-08-06 authority-flip).")
+    ap.add_argument("--vbat_eff", type=float, default=None,
+                    help="Vbat_eff software derate (V): pre-shape commanded targets so "
+                         "the firmware's implied torque stays inside the MDC envelope "
+                         "at this voltage (pbat = 60A * vbat_eff). Cuts push-off "
+                         "impulse WITHOUT touching residual authority -- the "
+                         "deterministic champion-day (sagged-pack) plant. Training DR "
+                         "drew Vbat 25.0-28.8, so 25-27 is in-distribution; start at "
+                         "27 and walk down. None = off.")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
     ap.add_argument("--out", default="data",
@@ -309,9 +389,9 @@ if __name__ == '__main__':
     if args.dry_run:
         logging.info("--dry-run: constructing controller (no DDS, no motion)...")
         c = CustomCmd(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                      meta_path=meta_path)
-        logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s tau_mode=%s",
-                     c.n_obs, c.n_ticks, c.blind, c.TAU_MODE)
+                      meta_path=meta_path, vbat_eff=args.vbat_eff)
+        logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s tau_mode=%s vbat_eff=%s",
+                     c.n_obs, c.n_ticks, c.blind, c.TAU_MODE, c.VBAT_EFF)
         sys.exit(0)
 
     print("WARNING: Please ensure there are no obstacles around the robot while running.")
@@ -323,7 +403,7 @@ if __name__ == '__main__':
         ChannelFactoryInitialize(0)
 
     custom = CustomCmd(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                       meta_path=meta_path)
+                       meta_path=meta_path, vbat_eff=args.vbat_eff)
     custom.Init()
     custom.Start()
 
