@@ -359,8 +359,8 @@ if __name__ == '__main__':
     import argparse
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/a2cmd_400.pt")
-    ap.add_argument("--meta", default="hopscotch_utils/a2cmd_meta.json", help="default: meta.json beside the checkpoint")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/acmd_800.pt")
+    ap.add_argument("--meta", default="hopscotch_utils/acmd_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json",
                     help="override meta's traj_path")
     ap.add_argument("--resid_scale", type=float, default=1,
@@ -368,7 +368,7 @@ if __name__ == '__main__':
                          "family, wall-family ckpts are NOT blanket-0.75x -- Afree/"
                          "AtauCmd sim picks are full-auth; check the run's eval "
                          "ledger before attenuating (2026-08-06 authority-flip).")
-    ap.add_argument("--vbat_eff", type=float, default=None,
+    ap.add_argument("--vbat_eff", type=float, default=30,
                     help="Vbat_eff software derate (V): pre-shape commanded targets so "
                          "the firmware's implied torque stays inside the MDC envelope "
                          "at this voltage (pbat = 60A * vbat_eff). Cuts push-off "
