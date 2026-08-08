@@ -1,0 +1,6 @@
+electrical summary (never enters the obs):
+  bus V   start 30.50  end 30.39  min 27.77 (sag 2.73)  [model-Vbat DR ceiling 28.8 -- see day-effect arc]
+  bus A   mean 8.3  peak 86.2
+  BMS SOC start 69%  end 69%
+  motor T start max 42C  end max 42C  worst rise +0C
+  VBAT_EFF 28.0V derate: clamped 15/170 ticks (9%), max excess shaped away 53.5 N*m

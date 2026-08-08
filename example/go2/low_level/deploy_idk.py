@@ -31,6 +31,13 @@ TWO THINGS THE NAIVE PORT GETS WRONG (both cost a run if missed):
 
 Both are handled below; see HopscotchRef.
 
+PHASED RESIDUAL AUTHORITY (default ON, --flat_resid to restore the old scalar):
+the residual multiplier is a per-phase SCHEDULE, not one number -- low through the
+pre-takeoff window (where an over-energetic push writes the z overshoot, and where
+no later correction can undo it), full in flight and on the diagonal stances (where
+the policy's authority buys attitude/foot placement at zero z-impulse cost). Built
+on the reference grid and smoothed; see Custom._build_resid_schedule.
+
 Everything else (46-dim frames, 1-step sensor+action latency, MDC applied-torque
 channel, PD with dq=qd_ref, ISO ordering, stand-up + integrator handoff) is
 unchanged from sysid_rl.py -- see its header for the contract rationale.
@@ -74,6 +81,8 @@ ISO_NAMES = [f"{leg}_{part}_joint" for part in ("hip", "thigh", "calf")
 MOTOR_FROM_ISO = [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
 FOOTFORCE_FROM_ISO_FOOT = [1, 0, 3, 2]           # FL FR RL RR <- (FR FL RR RL)
 FOOT_NAMES = ["FL", "FR", "RL", "RR"]
+DIAG_PAIRS = (np.array([1, 0, 0, 1], bool),      # FL + RR
+              np.array([0, 1, 1, 0], bool))      # FR + RL
 
 
 # --------------------------------------------- fixed control-loop constants
@@ -533,7 +542,7 @@ def _stem(path):
 
 class Custom:
     def __init__(self, ckpt_path, meta, traj_override=None, resid_scale=1.0,
-                 meta_path=None):
+                 meta_path=None, resid_phase=None):
         self.dt = CTRL_DT
         self.motiontime = 0
         # residual-authority attenuation (2026-07-31 sim verdict: the +3-5 cm apex /
@@ -543,7 +552,12 @@ class Custom:
         # policy's inputs stay contract-exact and scaling toward 0 degrades to pure
         # PD+FF (the vindicated zero-residual baseline).
         self.RESID_SCALE = float(resid_scale)
-        if self.RESID_SCALE != 1.0:
+        # ...and, when resid_phase is given, that scalar becomes a PER-PHASE schedule
+        # (see _build_resid_schedule). RESID_SCALE then only names the generic-stance
+        # value + the tag/report fallback; the number actually multiplying the action
+        # every tick is self.resid_at(t).
+        self.resid_phase = dict(resid_phase) if resid_phase else None
+        if self.resid_phase is None and self.RESID_SCALE != 1.0:
             logging.warning("RESIDUAL AUTHORITY %.2fx (trained 1.0x): effective "
                             "action_scale %.3f rad", self.RESID_SCALE,
                             self.RESID_SCALE * float(meta["action_scale"]))
@@ -571,10 +585,8 @@ class Custom:
                              f"phase residual (v14ph); this tick does not implement it.")
 
 
-        #self.KP = float(meta["kp"])
-        self.KP = 80
-        #self.KD = float(meta["kd"])
-        self.KD = 1
+        self.KP = float(meta["kp"])
+        self.KD = float(meta["kd"])
         self.ACTION_SCALE = float(meta["action_scale"])
         self.H = int(meta.get("obs_history_len", 10))
         self.NUM_FUTURE = int(meta.get("num_future", 2))
@@ -609,6 +621,7 @@ class Custom:
                                 meta.get("ff_damping_comp", 0.0),
                                 meta.get("ff_armature_comp", 0.0))
         self.n_ticks = int(np.ceil(self.ref.duration / self.dt))
+        self._build_resid_schedule()
 
 
         # ---------------- obs layout, derived then asserted ---------------------
@@ -691,7 +704,8 @@ class Custom:
         self.trace = {k: [] for k in
                       ("t", "rpy", "rpy_ref", "ori_err", "odom_xy", "ref_xy", "vhat",
                        "tilt", "action", "contacts", "forces", "q", "qd", "q_target",
-                       "tau_applied", "tau_p", "tau_d", "tau_ff", "tau_cmd")}
+                       "tau_applied", "tau_p", "tau_d", "tau_ff", "tau_cmd",
+                       "resid_scale")}
         # Every artifact this run writes is named for the four things that decide what
         # the robot actually did: which weights, which contract, how much residual
         # authority they were given, and which reference they tracked. A png named for
@@ -699,7 +713,7 @@ class Custom:
         # different resid_scale or against a re-cut trajectory.
         self.run_tag = "_".join([_stem(ckpt_path),
                                  _stem(meta_path) if meta_path else "nometa",
-                                 f"r{self.RESID_SCALE:.2f}".replace(".", "p"),
+                                 self._resid_tag,
                                  _stem(traj)])
 
 
@@ -726,6 +740,137 @@ class Custom:
         self.lowCmdWriteThreadPtr = None
         self.crc = CRC()
 
+
+    # ------------------------------------------------ phased residual authority
+    def _build_resid_schedule(self):
+        """Per-reference-knot residual scale -> self.resid_sched (T_state,).
+
+        ONE KNOB PER PHASE instead of one global multiplier, because a scalar has
+        to trade two things that live in different parts of the stride:
+
+          launch  the last `lead` s of any stance that ends in a flight phase, held
+                  `hold` s past liftoff. LOW. The z overshoot is written HERE and
+                  only here -- it is extension the plan did not ask for, integrated
+                  into the takeoff impulse, and by the time the robot is airborne
+                  there is nothing any controller can do about the apex.
+          air     the flight phases. FULL. Attitude authority in flight costs zero
+                  z impulse (the CoM is ballistic no matter what the legs do), and
+                  this is where the swing has to be placed for the contact plan.
+          diag    stance knots with exactly one diagonal pair planted (FL+RR or
+                  FR+RL). FULL. Two contact points, and the balance-critical part
+                  of the hopscotch -- the one place attenuating the policy costs
+                  more than it buys.
+          stance  everything else (the 4-foot stances outside their launch window).
+
+        PRIORITY IS launch-LAST: a diagonal stance's tail is also a pre-takeoff
+        window, and the two rules disagree there. Default resolves it toward the
+        launch dip (z overshoot is a takeoff phenomenon regardless of how many feet
+        are down); `launch_from="quad"` resolves it the other way, leaving the
+        diagonals at full authority end to end.
+
+        Built on the REFERENCE grid (1 kHz), then box-smoothed over `blend` s: a
+        step in the gain is a step in q_target, i.e. a kp*dq torque step (0.35->1.0
+        on a saturated action at action_scale 0.25 is 0.16 rad x kp -> ~16 N.m).
+        The kernel is centred and shorter than the launch plateau, so the gain is
+        at FULL depth at the liftoff knot rather than halfway through the ramp."""
+        ref = self.ref
+        air = np.asarray(ref.airborne, bool)
+        T, rdt = len(air), ref.dt
+        ph = self.resid_phase
+
+        if ph is None:
+            self.resid_sched = np.full(T, self.RESID_SCALE)
+            self._resid_tag = f"r{self.RESID_SCALE:.2f}".replace(".", "p")
+            self._resid_desc = f"{self.RESID_SCALE:.2f}x flat (trained 1.0x)"
+            return
+
+        for k in ("launch", "air", "diag", "stance"):
+            if not 0.0 <= ph[k] <= 2.0:
+                raise SystemExit(f"ABORT: --resid_{k}={ph[k]} outside [0, 2]. Above 1.0 "
+                                 f"is MORE authority than the policy was trained with.")
+        if ph["blend"] > 2.0 * ph["hold"] + 1e-9:
+            # the centred kernel reaches `blend/2` past the plateau, so the liftoff
+            # knot averages in some of the air value and the dip never gets to depth
+            # where it matters most. Not fatal -- the per-liftoff log below prints the
+            # value actually reached -- but it is never what you meant.
+            logging.warning("--resid_blend %.3f > 2x --resid_hold %.3f: the launch dip "
+                            "will NOT reach %.2f at liftoff (raise hold to >= %.3f)",
+                            ph["blend"], ph["hold"], ph["launch"], ph["blend"] / 2.0)
+
+        g = np.full(T, ph["stance"], float)
+        is_diag = np.zeros(T, bool)
+        for pair in DIAG_PAIRS:
+            is_diag |= (ref.contact == pair).all(1)
+        is_diag &= ~air
+        g[is_diag] = ph["diag"]
+        g[air] = ph["air"]
+
+        # seconds to the next flight knot (same construction as deploy_cmd's
+        # Vbat_eff clamp gate): sentinel-huge after the LAST flight, so the final
+        # stance is never mistaken for a launch window.
+        idx = np.arange(T)
+        nxt = np.minimum.accumulate(np.where(air, idx, 10 * T)[::-1])[::-1]
+        ttf = (nxt - idx) * rdt
+        pre = (~air) & (ttf <= ph["lead"])
+        if ph["launch_from"] == "quad":
+            pre &= ref.contact.all(1)
+        post = np.zeros(T, bool)
+        hold = int(round(ph["hold"] / rdt))
+        for k in np.flatnonzero(air[1:] & ~air[:-1]) + 1:      # liftoff knots
+            if pre[k - 1]:
+                post[k:k + hold] = True
+        launch = pre | post
+        g[launch] = ph["launch"]
+
+        w = int(round(ph["blend"] / rdt))
+        if w > 1:
+            w += 1 - w % 2                                     # odd -> centred
+            pad = w // 2
+            gp = np.concatenate([np.full(pad, g[0]), g, np.full(pad, g[-1])])
+            g = np.convolve(gp, np.full(w, 1.0 / w), mode="valid")
+        assert g.shape == (T,), g.shape
+        self.resid_sched = g
+
+        self._resid_tag = "rph" + "".join(
+            f"{k[0].upper()}{round(ph[k] * 100)}"
+            for k in ("launch", "stance", "diag", "air"))
+        self._resid_desc = (f"PHASED  launch {ph['launch']:.2f} / stance "
+                            f"{ph['stance']:.2f} / diag {ph['diag']:.2f} / air "
+                            f"{ph['air']:.2f}  (lead {ph['lead']:.2f}s hold "
+                            f"{ph['hold']:.2f}s blend {ph['blend']:.2f}s, "
+                            f"launch_from={ph['launch_from']})")
+
+        # ---- report the schedule the robot will actually fly, span by span. A
+        # phase table that says "diag" for zero knots is the whole failure mode of
+        # this feature (wrong trajectory, wrong foot order) and it is invisible in
+        # the numbers alone, so print it before anything moves.
+        lab = np.full(T, "stance", dtype="<U6")
+        lab[is_diag] = "diag"
+        lab[air] = "air"
+        lab[launch] = "launch"
+        logging.info("residual schedule: %s", self._resid_desc)
+        i = 0
+        while i < T:
+            j = i
+            while j < T and lab[j] == lab[i]:
+                j += 1
+            seg = g[i:j]
+            logging.info("  %6.3f-%6.3f s  %-6s  resid %.2f..%.2f",
+                         i * rdt, j * rdt, lab[i], seg.min(), seg.max())
+            i = j
+        for k in np.flatnonzero(air[1:] & ~air[:-1]) + 1:
+            logging.info("  liftoff @ %.3f s: resid %.3f (%s)", k * rdt, g[k],
+                         "dipped" if launch[k - 1] else "NOT dipped")
+        if not is_diag.any():
+            logging.warning("no diagonal-stance knots in this reference -- the "
+                            "--resid_diag knob is a no-op for it")
+
+    def resid_at(self, t):
+        """Scheduled residual scale at policy time t, lerped on the reference grid
+        exactly like ref_at/base_ref_at (the schedule is 1 kHz, the tick is 50 Hz)."""
+        i0, fr = self.ref._index(t)
+        s = self.resid_sched
+        return float((1.0 - fr) * s[i0] + fr * s[i0 + 1])
 
     # ---------------------------------------------------------------- public
     def Init(self):
@@ -917,7 +1062,8 @@ class Custom:
         a_cmd = self.prev_action                  # 1-step act latency (training nominal)
         self.prev_action = action
         q_ref_t, qd_ref_t, tau_ff_t = self.ref.ref_at(t)
-        q_target = q_ref_t + self.ACTION_SCALE * self.RESID_SCALE * a_cmd
+        rs = self.resid_at(t)                     # phase-scheduled (flat if disabled)
+        q_target = q_ref_t + self.ACTION_SCALE * rs * a_cmd
 
 
         fade = max(0.0, 1.0 - self.ii / self.handoff_fade_ticks)
@@ -946,6 +1092,7 @@ class Custom:
         tr["vhat"].append(vhat.copy())
         tr["tilt"].append(grav_b[2])
         tr["action"].append(a_cmd.copy())
+        tr["resid_scale"].append(rs)
         tr["contacts"].append(contacts_true.copy())
         tr["forces"].append(forces_n.copy())
         tr["q"].append(q.copy())
@@ -965,10 +1112,11 @@ class Custom:
             # never read the two as three components of one vector.
             _rp = np.degrees(_wrap_pi(tr["rpy"][-1] - tr["rpy_ref"][-1]))[:2]
             logging.info("t %.2f cont %s%s vhat [%+.2f %+.2f %+.2f] eh [%+.2f %+.2f] "
-                         "rp_e [%+.1f %+.1f] yaw_e %+.1f tilt %.2f |a| %.2f (loop %.1f Hz)",
+                         "rp_e [%+.1f %+.1f] yaw_e %+.1f tilt %.2f |a| %.2f r%.2f "
+                         "(loop %.1f Hz)",
                          t, contacts_true.astype(int), " (blinded)" if self.blind else "",
                          *vhat, *e_h, *_rp, np.degrees(yaw_e), grav_b[2],
-                         np.abs(a_cmd).max(), self._loop_hz)
+                         np.abs(a_cmd).max(), rs, self._loop_hz)
 
 
         if grav_b[2] > -0.4:
@@ -1003,6 +1151,7 @@ class Custom:
         t = T["t"]
         rpy_e = np.degrees(_wrap_pi(T["rpy"] - T["rpy_ref"]))       # (N,3) deg
         pos_e = T["odom_xy"] - T["ref_xy"]                          # (N,2) m
+        rsc = T["resid_scale"]                                      # (N,) as APPLIED
         aborted = bool(self.aborted)
 
 
@@ -1011,7 +1160,7 @@ class Custom:
                  f"checkpoint   : {self.ckpt_path}",
                  f"meta         : {self.meta_path}",
                  f"reference    : {self.traj_path}",
-                 f"resid auth   : {self.RESID_SCALE:.2f}x",
+                 f"resid auth   : {self._resid_desc}",
                  f"outcome      : {'ABORTED (tilt)' if aborted else 'completed'}"
                  f"   {len(t)}/{self.n_ticks} ticks, {t[-1]:.2f}/{self.ref.duration:.2f} s",
                  f"contact-blind: {self.blind}",
@@ -1030,9 +1179,11 @@ class Custom:
                   f"|action| mean/max   : {np.abs(T['action']).mean():.3f} / "
                   f"{np.abs(T['action']).max():.3f}",
                   f"action saturation   : {(np.abs(T['action']) > 0.99).mean() * 100:.1f}% of joint-ticks",
-                  f"resid authority     : {self.RESID_SCALE:.2f}x (effective scale "
-                  f"{self.ACTION_SCALE * self.RESID_SCALE:.3f} rad)",
-                  f"jitter (mrad/tick)  : {np.abs(np.diff(T['action'], axis=0)).mean() * 1000 * self.ACTION_SCALE * self.RESID_SCALE:.1f}"]
+                  f"resid authority     : {self._resid_desc}",
+                  f"resid APPLIED       : min {rsc.min():.2f} mean {rsc.mean():.2f} "
+                  f"max {rsc.max():.2f}  (effective scale {self.ACTION_SCALE * rsc.min():.3f}"
+                  f"..{self.ACTION_SCALE * rsc.max():.3f} rad)",
+                  f"jitter (mrad/tick)  : {(np.abs(np.diff(T['action'], axis=0)) * rsc[1:, None]).mean() * 1000 * self.ACTION_SCALE:.1f}"]
         # ---- contact profile: plan vs measured, per foot ---------------------
         # Ref sampled on the policy ticks. fref is in NEWTONS (trajopt lam); measured
         # is RAW PAD units (FOOT_FORCE_TO_N uncalibrated) -- compare TIMING and shape,
@@ -1117,7 +1268,9 @@ class Custom:
         np.savez(stem + ".npz", n_ticks=self.n_ticks, aborted=aborted,
                  blind=self.blind, run_tag=self.run_tag,
                  ckpt_path=str(self.ckpt_path), meta_path=str(self.meta_path),
-                 traj_path=str(self.traj_path), resid_scale=self.RESID_SCALE,
+                 traj_path=str(self.traj_path), resid_nominal=self.RESID_SCALE,
+                 resid_phase=json.dumps(self.resid_phase),
+                 resid_sched=self.resid_sched, resid_sched_dt=self.ref.dt,
                  action_scale=self.ACTION_SCALE, joint_names=np.array(ISO_NAMES),
                  force_ref=fref, contact_plan=plan, q_ref=qref, qd_ref=qdref, **T)
 
@@ -1203,8 +1356,11 @@ class Custom:
         ax[4].axhline(-0.4, ls=":", c="r", lw=1.2, label="abort threshold")
         ax[4].plot(t, np.abs(T["action"]).max(1), c="C2", lw=1.2, label="|action| max")
         ax[4].axhline(1.0, ls=":", c="0.6", lw=1.0)
-        ax[4].set_ylabel("tilt / |a|")
-        ax[4].legend(fontsize=8, loc="lower left", ncol=3)
+        # the schedule, on the same axes as |a| -- what the policy ASKED for vs how
+        # much of it the phase gate let through, read together.
+        ax[4].plot(t, rsc, c="C4", lw=1.4, label="resid scale (applied)")
+        ax[4].set_ylabel("tilt / |a| / resid")
+        ax[4].legend(fontsize=8, loc="lower left", ncol=4)
         for f, nm in enumerate(FOOT_NAMES):
             ax[5].plot(t, T["forces"][:, f], lw=1.3, label=nm)
         ax[5].axhline(CONTACT_FORCE_THRESHOLD_HW, ls=":", c="k", lw=1.2,
@@ -1213,7 +1369,7 @@ class Custom:
         ax[5].set_xlabel("t [s]  (shaded = planned flight)")
         ax[5].legend(fontsize=8, loc="upper left", ncol=5)
         fig.suptitle(f"{self.run_tag}\n{'ABORTED' if aborted else 'completed'}   "
-                     f"blind={self.blind}   resid {self.RESID_SCALE:.2f}x", fontsize=9)
+                     f"blind={self.blind}   resid {self._resid_desc}", fontsize=9)
         fig.tight_layout(rect=(0, 0, 1, 0.985))
         fig.savefig(stem + ".png", dpi=130)
         plt.close(fig)
@@ -1506,12 +1662,45 @@ if __name__ == '__main__':
     ap.add_argument("--checkpoint", default="hopscotch_utils/runA_650.pt")
     ap.add_argument("--meta", default="hopscotch_utils/runA_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
-    ap.add_argument("--resid_scale", type=float, default=1,
+    ap.add_argument("--resid_scale", type=float, default=0.75,
                     help="residual authority attenuation (1.0 = trained). 0.75 = the "
                          "2026-07-31 sim pick (every MJ-DR tail improved, partial apex/"
                          "timing fix, ~15 mrad); 0.5 = full nominal launch fix but opens "
                          "the tilt tail on the worst plants. Applied at q_target only; "
-                         "obs/ff/gains/ref untouched.")
+                         "obs/ff/gains/ref untouched. With phased resid ON (the default) "
+                         "this is only the GENERIC-STANCE value -- see --resid_stance.")
+    # ---- phased residual authority (default ON; --flat_resid restores the scalar) ----
+    ap.add_argument("--flat_resid", action="store_true",
+                    help="disable the phase schedule and apply --resid_scale flat, the "
+                         "pre-2026-08-07 behaviour.")
+    ap.add_argument("--resid_launch", type=float, default=0.35,
+                    help="resid scale in the pre-takeoff window. LOW: the z overshoot "
+                         "is extension the plan did not ask for, written into the "
+                         "takeoff impulse and unfixable once airborne. 0 = pure PD+FF "
+                         "launch (the plan's impulse exactly).")
+    ap.add_argument("--resid_air", type=float, default=1.0,
+                    help="resid scale in flight. Full by default: attitude/swing "
+                         "authority in the air costs zero z impulse and is what places "
+                         "the feet for the contact plan.")
+    ap.add_argument("--resid_diag", type=float, default=1.0,
+                    help="resid scale on diagonal-pair stances (FL+RR / FR+RL). Full by "
+                         "default -- the balance-critical part of the hopscotch.")
+    ap.add_argument("--resid_stance", type=float, default=None,
+                    help="resid scale on every other stance knot (default: --resid_scale)")
+    ap.add_argument("--resid_lead", type=float, default=0.20,
+                    help="length of the pre-takeoff window, s before each planned liftoff")
+    ap.add_argument("--resid_hold", type=float, default=0.05,
+                    help="hold the launch value this many s PAST liftoff, so the blend "
+                         "ramp back up happens in the air and the dip is at full depth "
+                         "at the liftoff knot itself")
+    ap.add_argument("--resid_blend", type=float, default=0.08,
+                    help="box-smoothing width, s. A step in the gain is a step in "
+                         "q_target (= a kp*dq torque step); 0 disables the smoothing.")
+    ap.add_argument("--resid_launch_from", choices=("all", "quad"), default="all",
+                    help="which stances get the launch dip. 'all' (default): every "
+                         "takeoff, so a diagonal stance's TAIL is dipped even though its "
+                         "body is at --resid_diag. 'quad': only 4-foot launches, leaving "
+                         "the diagonals at full authority end to end.")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
     ap.add_argument("--out", default="data",
@@ -1525,12 +1714,19 @@ if __name__ == '__main__':
     meta, meta_path = load_meta(args.checkpoint, args.meta)
 
 
+    resid_phase = None if args.flat_resid else {
+        "launch": args.resid_launch, "air": args.resid_air, "diag": args.resid_diag,
+        "stance": args.resid_scale if args.resid_stance is None else args.resid_stance,
+        "lead": args.resid_lead, "hold": args.resid_hold, "blend": args.resid_blend,
+        "launch_from": args.resid_launch_from}
+
+
     if args.dry_run:
         # Construction does all the validation (contract checks, reference load, ff
         # bake, obs layout, checkpoint shapes) and touches neither DDS nor the motors.
         logging.info("--dry-run: constructing controller (no DDS, no motion)...")
         c = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                   meta_path=meta_path)
+                   meta_path=meta_path, resid_phase=resid_phase)
         logging.info("DRY RUN OK: obs=%d ticks=%d blind=%s ff_d=%s ff_Ia=%s",
                      c.n_obs, c.n_ticks, c.blind,
                      meta.get("ff_damping_comp"), meta.get("ff_armature_comp"))
@@ -1551,7 +1747,7 @@ if __name__ == '__main__':
 
 
     custom = Custom(args.checkpoint, meta, args.traj, resid_scale=args.resid_scale,
-                    meta_path=meta_path)
+                    meta_path=meta_path, resid_phase=resid_phase)
     custom.Init()
     custom.Start()
 
