@@ -571,10 +571,10 @@ class Custom:
                              f"phase residual (v14ph); this tick does not implement it.")
 
 
-        #self.KP = float(meta["kp"])
-        self.KP = 80
-        #self.KD = float(meta["kd"])
-        self.KD = 1
+        self.KP = float(meta["kp"])
+        
+        self.KD = float(meta["kd"])
+        
         self.ACTION_SCALE = float(meta["action_scale"])
         self.H = int(meta.get("obs_history_len", 10))
         self.NUM_FUTURE = int(meta.get("num_future", 2))
@@ -1503,8 +1503,8 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="hopscotch_utils/runA_650.pt")
-    ap.add_argument("--meta", default="hopscotch_utils/runA_meta.json", help="default: meta.json beside the checkpoint")
+    ap.add_argument("--checkpoint", default="hopscotch_utils/kp60_1200.pt")
+    ap.add_argument("--meta", default="hopscotch_utils/kp60_meta.json", help="default: meta.json beside the checkpoint")
     ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
     ap.add_argument("--resid_scale", type=float, default=1,
                     help="residual authority attenuation (1.0 = trained). 0.75 = the "
