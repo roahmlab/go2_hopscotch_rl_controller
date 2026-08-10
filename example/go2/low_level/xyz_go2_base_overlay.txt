@@ -1,23 +1,23 @@
 mocap    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/xyz_go2.npz
 reference: /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/trajectories.npz
-sync     : t0 18.646 s, r 0.974, yaw -8.7 deg, zeroed on first 0.2 s
+sync     : t0 216.078 s, r 0.979, yaw -14.0 deg, zeroed on first 0.2 s
 
                     apex z      gain  fwd travel
        reference   0.4306m   0.2003m     0.6005m
-           vicon   0.4277m   0.1948m     0.5844m
+           vicon   0.4169m   0.1861m     0.7320m
 
           flight    ref apex  vicon apex     delta
-      0.40-0.70s     0.1980m     0.1948m  -0.0032m
-      1.10-1.40s     0.1935m     0.1909m  -0.0026m
-      1.90-2.20s     0.1983m     0.1731m  -0.0252m
-      2.70-3.00s     0.2003m     0.1489m  -0.0514m
+      0.40-0.70s     0.1980m     0.1861m  -0.0119m
+      1.10-1.40s     0.1935m     0.1790m  -0.0145m
+      1.90-2.20s     0.1983m     0.1616m  -0.0366m
+      2.70-3.00s     0.2003m     0.1633m  -0.0370m
 
    axis    RMS err   max|err|     final
-      x    0.0251m    0.0544m  -0.0179m
-      y    0.0454m    0.0865m  -0.0470m
-      z    0.0200m    0.0615m   0.0072m
+      x    0.0733m    0.1967m   0.1279m
+      y    0.0464m    0.0706m   0.0044m
+      z    0.0207m    0.0602m   0.0043m
 
-   roll     3.543°    10.159°    3.457°
-  pitch     2.151°     6.862°   -3.633°
-    yaw     4.184°    10.184°    0.733°
-  total     5.822°    13.201°    5.052°   (geodesic attitude error)
+   roll     1.824°     3.413°    1.815°
+  pitch     1.262°     3.490°   -2.498°
+    yaw     1.323°     3.844°    0.028°
+  total     2.577°     4.999°    3.087°   (geodesic attitude error)
