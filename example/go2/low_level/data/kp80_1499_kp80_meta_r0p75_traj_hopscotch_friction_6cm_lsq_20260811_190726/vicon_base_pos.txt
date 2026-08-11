@@ -1,0 +1,20 @@
+mocap        : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/xyz_go2.npz
+run trace    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/data/kp80_1499_kp80_meta_r0p75_traj_hopscotch_friction_6cm_lsq_20260811_190726/kp80_1499_kp80_meta_r0p75_traj_hopscotch_friction_6cm_lsq_20260811_190726.npz
+plan         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json
+sync         : t0 2.455 s into the recording, correlation r 0.970
+frame        : yaw -35.1 deg, zeroed on the first 0.2 s
+
+                    apex z      gain  fwd travel
+            plan   0.4564m   0.2260m     0.6003m
+           vicon   0.5065m   0.2746m     0.5071m
+
+   flight window   plan apex  vicon apex     delta
+      0.40-0.70s     0.1999m     0.2096m  +0.0097m
+      1.10-1.40s     0.2188m     0.2746m  +0.0558m
+      1.90-2.20s     0.2260m     0.2203m  -0.0057m
+      2.70-3.00s     0.2043m     0.1964m  -0.0079m
+
+   axis    RMS err   max|err|     final
+      x    0.0565m    0.0972m  -0.0972m
+      y    0.0999m    0.1775m  -0.0513m
+      z    0.0266m    0.0817m  -0.0244m
