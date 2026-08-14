@@ -1560,7 +1560,7 @@ if __name__ == '__main__':
 
     launched = False
     saved = False
-    try:
+    try:/go2_hopscotch_rl_controller/example/go2/low_level
         while True:
             if custom.aborted:
                 if not saved:                 # save the partial run: the tail before a

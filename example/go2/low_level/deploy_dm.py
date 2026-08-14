@@ -1269,10 +1269,10 @@ class Custom:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", required=True,
+    ap.add_argument("--checkpoint", default = "dm_utils/dm11_1499.pt",required=False,
                     help=".pt of a KINEMATIC-family run (dm_v*, kin_v4+)")
-    ap.add_argument("--meta", default=None, help="default: meta.json beside the checkpoint")
-    ap.add_argument("--traj", default=None, help="override meta's traj_path")
+    ap.add_argument("--meta", default="dm_utils/dm11_meta.json", help="default: meta.json beside the checkpoint")
+    ap.add_argument("--traj", default="traj_hopscotch_friction_6cm_lsq.json", help="override meta's traj_path")
     ap.add_argument("--dry-run", action="store_true",
                     help="load + validate everything, then exit without touching the robot")
     ap.add_argument("--out", default="data",

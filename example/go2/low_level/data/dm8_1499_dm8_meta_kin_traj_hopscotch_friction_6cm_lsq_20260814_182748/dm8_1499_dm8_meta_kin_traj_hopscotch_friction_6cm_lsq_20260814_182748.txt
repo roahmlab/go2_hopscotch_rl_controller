@@ -1,0 +1,38 @@
+run          : dm8_1499_dm8_meta_kin_traj_hopscotch_friction_6cm_lsq
+checkpoint   : dm_utils/dm8_1499.pt
+meta         : dm_utils/dm8_meta.json
+reference    : hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json
+contract     : kinematic ref-anchor, frame 58, obs 723, tau_obs 'cmd', lpf 0
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     3.72°     7.65°   -3.81°
+  pitch     5.50°    14.12°    4.14°
+    yaw     3.86°    10.84°   -1.06°
+
+worst tilt (grav_z) : -0.904   (abort at > -0.40)
+|action| mean/max   : 0.111 / 0.685
+action saturation   : 0.0% of joint-ticks
+jitter (mrad/tick)  : 38.9   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.40s      ?    +60    +40    +60
+  touchdown   0.70s    n/a    +40    +60    +40
+    takeoff   1.10s      ?    +60    +40    +60
+  touchdown   1.40s    n/a      -      -    +80
+    takeoff   1.90s      ?      -      -    +80
+  touchdown   2.20s      -    +40    +60      -
+    takeoff   2.70s      -    +60    +40      -
+  touchdown   3.00s    n/a     +0    +40    +60
+
+diag swing-foot touches: 30 tick-feet, median force 43 max 50 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |resid|  max|resid|  |qd-ref|
+    hip    0.0935    0.0754    0.1142      0.3871     1.429
+  thigh    0.1000    0.0941    0.1026      0.5234     2.129
+   calf    0.1333    0.2007    0.2191      0.6850     3.328
+    all    0.1103    0.1352    0.1545      0.6850     2.425
+worst-tracked joint : FL_calf_joint (max |q-cmd| 0.6136 rad)

@@ -117,15 +117,34 @@ def load_mocap(path):
     return t, xyz
 
 
-def is_deploy_npz(path):
-    """deploy_meta trace vs Vicon record, told apart by content rather than by
-    filename -- the two live side by side in a run directory once the mocap file has
-    been copied in, and nothing enforces what it is called."""
+def _keys(path):
     try:
         with np.load(path, allow_pickle=True) as d:
-            return "odom_xy" in d.files
+            return set(d.files)
     except Exception:                                  # noqa: BLE001
-        return False
+        return set()
+
+
+def is_deploy_npz(path):
+    """Deploy trace vs everything else in the directory, told apart by content rather
+    than by filename -- nothing enforces what any of these are called.
+
+    KEYED ON `n_ticks`+`aborted`, NOT on `odom_xy`. Only deploy_meta.py carries velest
+    odometry; deploy_dm.py's trace has no odom_xy at all, so the old test silently
+    classified a perfectly good dm run as "not a deploy trace" -- which then fell
+    through to being treated as the Vicon record. These two keys are written by every
+    run script's main trace and by none of its `_torque_*.npz` sidecars (those carry
+    only `run_tag`), so they identify the trace and nothing else in the run dir."""
+    return {"n_ticks", "aborted"} <= _keys(path)
+
+
+def is_mocap_npz(path):
+    """A record_floating_base.py record, identified positively. `not is_deploy_npz`
+    is not the same thing: a run directory also holds the torque sidecars, and one of
+    those getting picked as "the Vicon record" fails much later and much less
+    legibly."""
+    f = _keys(path)
+    return "xyz" in f or {"x", "y", "z"} <= f
 
 
 def newest_run(outdir="data"):
@@ -141,7 +160,7 @@ def split_rundir(d):
     """(deploy npz, mocap npz) inside a run directory. Either may be None."""
     npzs = sorted(glob.glob(os.path.join(d, "*.npz")), key=os.path.getmtime)
     dep = [f for f in npzs if is_deploy_npz(f)]
-    moc = [f for f in npzs if not is_deploy_npz(f)]
+    moc = [f for f in npzs if is_mocap_npz(f)]
     if len(moc) > 1:
         print(f"  note: {len(moc)} non-deploy npz files in {d}; using the newest "
               f"({os.path.basename(moc[-1])}) -- pass --mocap to pick another")
@@ -284,11 +303,17 @@ def main():
     t_moc, moc_xyz = load_mocap(args.mocap)
 
     run = None
+    has_odom = False
     run_path = args.run or newest_run(args.outdir)
     if run_path and os.path.exists(run_path):
         run = np.load(run_path, allow_pickle=True)
+        # deploy_dm.py has no velocity-estimator head, so its trace has no odometry to
+        # overlay. Everything else about the comparison is unaffected -- plan vs Vicon
+        # is the point, and odom was only ever a third opinion.
+        has_odom = "odom_xy" in run.files
         print(f"run trace: {run_path} ({len(run['t'])} ticks, "
-              f"{'ABORTED' if bool(run['aborted']) else 'completed'})")
+              f"{'ABORTED' if bool(run['aborted']) else 'completed'}"
+              f"{'' if has_odom else ', no odom_xy -- overlay omitted'})")
         # The outputs belong WITH the trace they describe. Without this the plots land
         # in the cwd and the next run silently overwrites them, which is how a haul of
         # runs ends up with exactly one set of plots.
@@ -398,7 +423,7 @@ def main():
         shade(ax3[i])
         ax3[i].plot(t_ref, ref_xyz[:, i], "--", c="0.35", lw=1.5, label="plan")
         ax3[i].plot(t_al, moc[:, i], c="C1", lw=1.6, label="vicon")
-        if run is not None and i < 2:
+        if run is not None and has_odom and i < 2:
             ax3[i].plot(run["t"], run["odom_xy"][:, i], c="C2", lw=1.2, alpha=0.85,
                         label="velest odom")
         ax3[i].set_ylabel(f"{lbl} [m]")
