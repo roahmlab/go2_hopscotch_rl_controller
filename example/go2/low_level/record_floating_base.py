@@ -59,6 +59,11 @@ POLL_SLEEP = 5e-4                # idle-poll pacing; see the de-dup block in mai
 # xyz metres, quaternion as Tracker delivers it (the consumer resolves the ordering).
 UDP_MAGIC = 0x56424731
 UDP_STRUCT = struct.Struct("<Iqdddddddd")   # magic, frame, t_send, xyz, quat4 -> 76 B
+# --feet uses its OWN magic so a consumer expecting one layout can never misparse the
+# other: base pose then four foot xyz, in the order --feet lists them.
+UDP_MAGIC_FEET = 0x56424732
+UDP_STRUCT_FEET = struct.Struct("<Iq" + "d" * 20)   # + 4x xyz -> 172 B
+DEFAULT_FEET = "FL,FR,RL,RR"                        # MuJoCo foot order
 DEFAULT_UDP = "127.0.0.1:9870"
 
 
@@ -85,6 +90,10 @@ def main():
     ap.add_argument("--host", default=DEFAULT_HOST, help="Vicon Tracker host")
     ap.add_argument("--subject", default=DEFAULT_SUBJECT,
                     help="subject name in Tracker (the Go1 rig used a different one)")
+    ap.add_argument("--feet", nargs="?", const=DEFAULT_FEET, default=None,
+                    metavar="FL,FR,RL,RR",
+                    help="also stream four foot subjects, comma separated, in this "
+                         "wire order (default {DEFAULT_FEET})".format(DEFAULT_FEET=DEFAULT_FEET))
     ap.add_argument("--out", default="xyz_go2.npz", help="output npz")
     ap.add_argument("--duration", type=float, default=None,
                     help="auto-stop after this many seconds (default: run until Enter)")
@@ -135,7 +144,27 @@ def main():
         raise SystemExit(f"ABORT: no root segment for subject {args.subject!r}")
     print(f"recording {args.subject}/{seg} from {args.host}")
 
+    foot_names = foot_segs = None
+    if args.feet:
+        foot_names = [n.strip() for n in args.feet.split(",") if n.strip()]
+        if len(foot_names) != 4:
+            raise SystemExit(f"ABORT: --feet needs exactly 4 names, got {foot_names}")
+        if names is not None:
+            missing = [n for n in foot_names if n not in names]
+            if missing:
+                raise SystemExit(f"ABORT: foot subjects {missing} not in {names}.")
+        foot_segs = []
+        for n in foot_names:
+            fs = vicon.get_subject_root_segment_name(n)
+            if not fs:
+                raise SystemExit(f"ABORT: no root segment for foot subject {n!r}")
+            foot_segs.append(fs)
+        print("feet (wire order): "
+              + ", ".join(f"{n}/{g}" for n, g in zip(foot_names, foot_segs)))
+
     t_arr, iso_arr, pos_arr, quat_arr, fnum_arr = [], [], [], [], []
+    foot_arr = []
+    n_foot_occluded = np.zeros(4, np.int64)
     n_occluded = n_gap = n_sent = n_send_err = 0
     last_fnum = None
     has_fnum = hasattr(vicon, "get_frame_number")
@@ -193,13 +222,34 @@ def main():
             if np.isnan(p).any():
                 n_occluded += 1
 
+            # Feet are read but never gate the datagram: a swing foot is occluded far more
+            # often than the base, so an occluded foot goes out as NaN and the consumer
+            # decides (hold last / fault). Dropping the frame would starve the base too.
+            fpos = None
+            if foot_names is not None:
+                fpos = np.full((4, 3), np.nan)
+                for i, (fn, fg) in enumerate(zip(foot_names, foot_segs)):
+                    fp = vicon.get_segment_global_translation(fn, fg)
+                    if fp is not None:
+                        v = np.asarray(fp, float).ravel()[:3] * MM_TO_M
+                        if np.any(v):
+                            fpos[i] = v
+                    if np.isnan(fpos[i]).any():
+                        n_foot_occluded[i] += 1
+
             # Forward before appending: the live consumer is latency-critical, the
             # recording is not. Occluded frames are recorded but never sent.
             if sock is not None and not np.isnan(p).any():
                 qs = np.where(np.isfinite(q), q, 0.0)
                 try:
-                    sock.sendto(UDP_STRUCT.pack(UDP_MAGIC, int(fnum),
-                                                time.monotonic(), *p, *qs), udp_addr)
+                    if fpos is None:
+                        buf = UDP_STRUCT.pack(UDP_MAGIC, int(fnum),
+                                              time.monotonic(), *p, *qs)
+                    else:
+                        buf = UDP_STRUCT_FEET.pack(UDP_MAGIC_FEET, int(fnum),
+                                                   time.monotonic(), *p, *qs,
+                                                   *fpos.ravel())
+                    sock.sendto(buf, udp_addr)
                     n_sent += 1
                 except OSError:
                     n_send_err += 1
@@ -210,20 +260,25 @@ def main():
             pos_arr.append(p)
             quat_arr.append(q)
             fnum_arr.append(fnum)
+            if fpos is not None:
+                foot_arr.append(fpos)
 
             if len(t_arr) % 200 == 0:
                 rate = len(t_arr) / max(now - t_start, 1e-9)
                 print(f"[{now - t_start:6.2f}s] n={len(t_arr):6d} {rate:5.1f} Hz  "
                       f"xyz {np.round(p, 4)}  occluded {n_occluded}"
+                      + (f"  foot z {np.round(fpos[:, 2], 4)}" if fpos is not None else "")
                       + (f"  sent {n_sent}" + (f" ERR {n_send_err}" if n_send_err else "")
                          if sock is not None else ""))
     except KeyboardInterrupt:
         print("\nCtrl-C -- saving what was captured")
     finally:
-        save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_gap)
+        save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_gap,
+             foot_arr, foot_names, n_foot_occluded)
 
 
-def save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_gap=0):
+def save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_gap=0,
+         foot_arr=None, foot_names=None, n_foot_occluded=None):
     if len(t_arr) < 2:
         print("nothing recorded -- no file written")
         return
@@ -235,11 +290,15 @@ def save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_g
 
     outdir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(outdir, exist_ok=True)
+    extra = {}
+    if foot_arr:
+        extra["foot_xyz"] = np.asarray(foot_arr, float)      # (N,4,3) metres, wire order
+        extra["foot_subjects"] = np.asarray(foot_names)
     np.savez(args.out,
              t=t, x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], xyz=xyz,
              quat_xyzw=quat, frame=np.asarray(fnum_arr, np.int64),
              iso=np.asarray(iso_arr), units="m", subject=args.subject,
-             segment=str(seg), host=args.host, fps=fps)
+             segment=str(seg), host=args.host, fps=fps, **extra)
 
     print(f"\nsaved {args.out}: {len(t)} samples, {t[-1] - t[0]:.2f} s, "
           f"{fps:.1f} Hz median ({n_occluded} occluded)")
@@ -253,6 +312,14 @@ def save(args, t_arr, iso_arr, pos_arr, quat_arr, fnum_arr, n_occluded, seg, n_g
     if n_occluded:
         print(f"  WARNING: {100.0 * n_occluded / len(t):.1f}% of samples occluded "
               f"(stored as NaN)")
+    if foot_arr:
+        fz = np.asarray(foot_arr, float)[:, :, 2]
+        for i, nm in enumerate(foot_names):
+            col = fz[:, i][~np.isnan(fz[:, i])]
+            occ = 100.0 * n_foot_occluded[i] / len(t) if n_foot_occluded is not None else 0.0
+            print(f"  {nm}: z {col.min():.4f} .. {col.max():.4f} m" if col.size
+                  else f"  {nm}: no valid samples", end="")
+            print(f"  ({occ:.1f}% occluded)")
     if n_gap:
         # Camera frames the poll never saw. A handful is nothing; a large count means
         # the poll is being starved and the record is undersampling the stream.
