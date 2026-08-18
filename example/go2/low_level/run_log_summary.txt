@@ -2,30 +2,30 @@ log   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/run_log.np
 rows  : 340  0.00-3.39 s @ 100 Hz
 
      joint    q rms    q max   dq rms   dq max    |v|max  |tau|max  tau/lim   sat
-    FL hip  0.0524   0.1271    0.818    5.497   16.4035    22.611     0.95     0
-  FL thigh  0.0389   0.1072    1.086    8.034   17.9282    21.250     0.90     0
-   FL calf  0.0533   0.2518    1.244    7.572   28.5654    50.639     1.11     1
-    FR hip  0.0415   0.1254    0.819    6.461   14.0540    20.335     0.86     0
-  FR thigh  0.0409   0.1481    1.213   10.485   20.1612    26.396     1.11     1
-   FR calf  0.0557   0.2073    1.197    7.299   17.3361    40.635     0.89     0
-    RL hip  0.0533   0.1693    1.034    6.268   23.0170    16.154     0.68     0
-  RL thigh  0.0485   0.1394    0.830    4.667   13.2777    14.150     0.60     0
-   RL calf  0.0513   0.2131    1.046    4.666   14.9583    38.074     0.84     0
-    RR hip  0.0300   0.0869    0.848    5.921   15.3375    20.706     0.87     0
-  RR thigh  0.0478   0.1604    1.038    7.341   20.6754    17.589     0.74     0
-   RR calf  0.0592   0.2565    1.195    7.765   15.5394    45.661     1.01     1
+    FL hip  0.1748   0.5460    1.595    5.663   21.1957    21.943     0.93     0
+  FL thigh  0.4720   1.2375    2.421    7.201   26.3746    22.660     0.96     0
+   FL calf  0.4829   1.1508    3.251   15.171   37.3382    50.118     1.10     3
+    FR hip  0.1510   0.3984    1.569    7.902   15.0859    22.042     0.93     0
+  FR thigh  0.4914   1.2546    2.663   10.068   24.3495    26.049     1.10     3
+   FR calf  0.4956   1.1877    2.930   12.889   34.2967    46.135     1.02     3
+    RL hip  0.2328   0.5475    1.961   12.098   33.8964    19.395     0.82     0
+  RL thigh  0.3538   0.8971    2.196    8.796   19.1124    17.292     0.73     0
+   RL calf  0.2086   0.6493    3.219   13.878   47.3679    40.066     0.88     0
+    RR hip  0.1676   0.3761    1.659    6.974   25.5974    18.554     0.78     0
+  RR thigh  0.4542   1.0999    2.762   10.455   22.7578    18.183     0.77     0
+   RR calf  0.5511   1.1691    2.845   10.437   15.3325    40.872     0.90     0
 
       axis        rms   max|err|     final
-      roll     1.227°     3.651°    0.398°
-     pitch     1.392°     3.556°    0.328°
-       yaw     0.725°     2.142°    1.132°
-        wx    0.341r/s    2.566r/s   0.038r/s
-        wy    0.270r/s    1.724r/s  -0.091r/s
-        wz    0.168r/s    0.808r/s   0.004r/s
+      roll     5.942°    13.994°    2.503°
+     pitch     2.271°    10.057°   -0.446°
+       yaw     4.718°    11.867°    0.696°
+        wx    0.677r/s    3.916r/s   0.245r/s
+        wy    0.473r/s    3.119r/s  -0.191r/s
+        wz    0.428r/s    1.273r/s  -0.073r/s
 
-overall   q rms 0.0484 rad   dq rms 1.043 rad/s   |v| mean 3.152 max 28.565 Nm
-          peak tau/limit 1.11   ticks with any joint saturated 3/340   cmd-meas rms 4.57 Nm
-          accel |.| mean 10.63 max 34.37 m/s^2
-          contact schedule agreement  FL 46%  FR 86%  RL 77%  RR 88%   (all 74%)
-          stance Fz measured/planned  FL 0.38  FR 0.70  RL 0.67  RR 0.87   rms err 55.1 N
-          mocap pos err rms x 0.0365m  y 0.0479m  z 0.0243m   age med 0.1 max 21.8 ms   frames dropped 109
+overall   q rms 0.3827 rad   dq rms 2.494 rad/s   |v| mean 4.334 max 47.368 Nm
+          peak tau/limit 1.10   ticks with any joint saturated 7/340   cmd-meas rms 6.20 Nm
+          accel |.| mean 10.66 max 32.90 m/s^2
+          contact schedule agreement  FL 53%  FR 83%  RL 77%  RR 77%   (all 72%)
+          stance Fz measured/planned  FL 0.40  FR 0.67  RL 0.70  RR 0.68   rms err 59.8 N
+          mocap pos err rms x 0.3613m  y 0.0768m  z 0.0374m   age med 0.1 max 20.1 ms   frames dropped 96
