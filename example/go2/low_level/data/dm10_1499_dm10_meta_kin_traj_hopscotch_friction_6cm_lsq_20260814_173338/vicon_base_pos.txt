@@ -1,5 +1,5 @@
 mocap        : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/xyz_go2.npz
-run trace    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/data/dm10_1499_dm10_meta_kin_traj_hopscotch_friction_6cm_lsq_20260814_173522/dm10_1499_dm10_meta_kin_traj_hopscotch_friction_6cm_lsq_20260814_173522.npz
+run trace    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/data/dm10_1499_dm10_meta_kin_traj_hopscotch_friction_6cm_lsq_20260814_173338/dm10_1499_dm10_meta_kin_traj_hopscotch_friction_6cm_lsq_20260814_173338.npz
 plan         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/traj_hopscotch_friction_6cm_lsq.json
 sync         : t0 3.243 s into the recording, correlation r 0.896
 frame        : yaw +0.5 deg, zeroed on the first 0.2 s

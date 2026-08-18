@@ -1,0 +1,108 @@
+{
+  "control_mode": "kinematic",
+  "kin_anchor": "ref",
+  "kin_anchor_qd": true,
+  "obs_act_hist": true,
+  "q_home": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.8999999761581421,
+    0.8999999761581421,
+    0.8999999761581421,
+    0.8999999761581421,
+    -1.7999999523162842,
+    -1.7999999523162842,
+    -1.7999999523162842,
+    -1.7999999523162842
+  ],
+  "act_lpf_beta": 0.0,
+  "jlimit_clamp_frac": 0.97,
+  "joint_names": [
+    "FL_hip_joint",
+    "FR_hip_joint",
+    "RL_hip_joint",
+    "RR_hip_joint",
+    "FL_thigh_joint",
+    "FR_thigh_joint",
+    "RL_thigh_joint",
+    "RR_thigh_joint",
+    "FL_calf_joint",
+    "FR_calf_joint",
+    "RL_calf_joint",
+    "RR_calf_joint"
+  ],
+  "compliant_feet": false,
+  "traj_path": "/home/vansht/dont_fear/rl-res/long_stride.npz",
+  "ff_damping_comp": 0.0,
+  "ff_armature_comp": 0.0,
+  "kp": 60.0,
+  "kd": 1.5,
+  "action_scale": 1.0,
+  "hold_targets": true,
+  "use_motor_model": true,
+  "mdc": {
+    "Vbat": 28.8,
+    "Pbat": 1728.0,
+    "gr": 6.33,
+    "Kt": 0.26,
+    "Kv": 3.846153846153846,
+    "R": 0.66
+  },
+  "obs_history_len": 10,
+  "preview_steps": 5,
+  "num_future": 2,
+  "clip_obs": 10.0,
+  "priv_v2": true,
+  "obs_o1_scale": true,
+  "rsi_t0_frac": 0.0,
+  "obs_ori_err": true,
+  "obs_velest": false,
+  "odom_clamp": 0.5,
+  "obs_contact_prev": true,
+  "obs_contact_blind": true,
+  "obs_tau_mode": "cmd",
+  "sysid_set": "union",
+  "obs_priv_base": false,
+  "sensor_dr": false,
+  "dr_kpkd_off": true,
+  "sysid_nominal": true,
+  "observation_space": 723,
+  "state_space": 762,
+  "action_space": 12,
+  "phase_scale": 0.04,
+  "phase_ema": 0.5,
+  "recipe": "chill_out_deepmimic_v0",
+  "term_knee": [
+    true,
+    0.025,
+    3
+  ],
+  "swing_clear_td_grace_s": 0.0,
+  "dr_calf": {
+    "arm": [
+      0.013,
+      0.02414
+    ],
+    "fc": [
+      0.89,
+      2.077
+    ],
+    "fv": [
+      0.0247,
+      0.0323
+    ],
+    "tq": [
+      0.85,
+      1.0
+    ],
+    "beta": null
+  },
+  "dr": {
+    "pinned": 1.0,
+    "frozen": true,
+    "pushes": false
+  },
+  "rsi": "uniform"
+}

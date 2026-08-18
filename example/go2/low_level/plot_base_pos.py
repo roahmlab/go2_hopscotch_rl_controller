@@ -167,6 +167,46 @@ def split_rundir(d):
     return (dep[-1] if dep else None), (moc[-1] if moc else None)
 
 
+def resolve_traj(explicit, run, run_path):
+    """Which reference this run actually flew.
+
+    A HARDCODED DEFAULT IS WRONG HERE. deploy_dm.py takes `--traj` (default
+    long_stride.npz) and deploy_meta.py takes meta's traj_path, and both stamp the
+    result into the trace as `traj_path` -- so the trace already knows, and reading it
+    is the only way this script stays correct as references change. Plotting a run
+    against a reference it never flew fails SILENTLY: the sync still locks, the yaw
+    still fits, and every apex/RMS number in the report is then a comparison against
+    the wrong plan.
+
+    Search order for a recorded path that no longer resolves from the cwd (deploy runs
+    on the robot, plotting happens wherever): as recorded, then beside the trace, then
+    hopscotch_utils/<basename> -- the same local-copy fallback deploy_dm.py itself
+    applies at load time."""
+    if explicit:
+        return explicit
+    if run is None or "traj_path" not in run.files:
+        print(f"plan: no traj_path in the trace -- falling back to {DEFAULT_TRAJ}")
+        return DEFAULT_TRAJ
+    rec = str(run["traj_path"])
+    base = os.path.basename(rec)
+    for cand in (rec,
+                 os.path.join(os.path.dirname(run_path or ""), base),
+                 os.path.join("hopscotch_utils", base)):
+        # `is_deploy_npz` rejects the trace itself and its sidecars: the beside-the-trace
+        # candidate lands inside the run directory, so a basename collision there would
+        # otherwise hand this run's own trace back as its reference.
+        if cand and os.path.exists(cand) and not is_deploy_npz(cand):
+            if cand != rec:
+                print(f"plan: trace flew {rec}, which is not here; using {cand}")
+            else:
+                print(f"plan: from the trace -- {cand}")
+            return cand
+    raise SystemExit(f"ABORT: this run flew {rec}, which is not on disk (looked beside "
+                     f"the trace and in hopscotch_utils/ too). Pass --traj to point at "
+                     f"it -- plotting against {DEFAULT_TRAJ} instead would compare the "
+                     f"run to a plan it never flew and every number would be wrong.")
+
+
 # ------------------------------------------------------------------- alignment
 def _uniform(t, v, dt):
     """Resample onto a uniform grid, interpolating across occlusion NaNs. Only the
@@ -260,7 +300,9 @@ def main():
                          "it. Overrides --mocap/--run/--prefix unless those are given.")
     ap.add_argument("--mocap", default=None, help="record_floating_base.py npz "
                                                   "(default: xyz_go2.npz, or from --dir)")
-    ap.add_argument("--traj", default=DEFAULT_TRAJ, help="reference (.json modes or .npz)")
+    ap.add_argument("--traj", default=None,
+                    help="reference (.json modes or .npz). Default: whatever the run "
+                         f"trace says it flew (traj_path), else {DEFAULT_TRAJ}")
     ap.add_argument("--run", default=None,
                     help="deploy_meta.py run npz for the odometry overlay "
                          "(default: newest under --outdir, or from --dir)")
@@ -296,12 +338,8 @@ def main():
     if args.mocap is None:
         args.mocap = "xyz_go2.npz"
 
-    t_ref, ref_xyz, airborne = load_reference(args.traj)
-    dur = t_ref[-1]
-    print(f"plan: {len(t_ref)} knots @ {t_ref[1] - t_ref[0]:.4f} s, {dur:.2f} s")
-
-    t_moc, moc_xyz = load_mocap(args.mocap)
-
+    # The trace is read BEFORE the reference, because the trace is what says which
+    # reference to read.
     run = None
     has_odom = False
     run_path = args.run or newest_run(args.outdir)
@@ -322,6 +360,13 @@ def main():
             print(f"  -> writing plots + summary into {args.prefix}")
     else:
         print("no deploy_meta run trace found -- plotting plan vs mocap only")
+
+    args.traj = resolve_traj(args.traj, run, run_path)
+    t_ref, ref_xyz, airborne = load_reference(args.traj)
+    dur = t_ref[-1]
+    print(f"plan: {len(t_ref)} knots @ {t_ref[1] - t_ref[0]:.4f} s, {dur:.2f} s")
+
+    t_moc, moc_xyz = load_mocap(args.mocap)
 
     # ---- time sync -------------------------------------------------------
     if args.t0 is not None:

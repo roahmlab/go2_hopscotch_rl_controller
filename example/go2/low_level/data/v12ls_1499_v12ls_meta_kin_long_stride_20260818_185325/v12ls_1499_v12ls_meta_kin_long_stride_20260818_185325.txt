@@ -1,0 +1,38 @@
+run          : v12ls_1499_v12ls_meta_kin_long_stride
+checkpoint   : dm_utils/v12ls_1499.pt
+meta         : dm_utils/v12ls_meta.json
+reference    : hopscotch_utils/long_stride.npz
+contract     : kinematic ref-anchor, frame 58, obs 723, tau_obs 'cmd', lpf 0
+outcome      : completed   170/170 ticks, 3.38/3.40 s
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll     4.12°    12.71°    0.68°
+  pitch     8.69°    20.60°    3.48°
+    yaw     7.20°    21.58°    8.35°
+
+worst tilt (grav_z) : -0.906   (abort at > -0.40)
+|action| mean/max   : 0.139 / 0.755
+action saturation   : 0.0% of joint-ticks
+jitter (mrad/tick)  : 37.1   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.40s      ?    +80    +60    +80
+  touchdown   0.70s    n/a    +80    +60    +60
+    takeoff   1.10s      ?    +80    +40    +60
+  touchdown   1.40s    n/a      -      -    +40
+    takeoff   1.90s      ?      -      -    +80
+  touchdown   2.20s      -    +80    +20      -
+    takeoff   2.70s      -    +80    +80      -
+  touchdown   3.00s    +20    +20    -40     +0
+
+diag swing-foot touches: 25 tick-feet, median force 33 max 45 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |resid|  max|resid|  |qd-ref|
+    hip    0.1453    0.0833    0.1387      0.4537     1.560
+  thigh    0.1724    0.1085    0.1601      0.4295     2.225
+   calf    0.1864    0.2446    0.2407      0.7553     2.798
+    all    0.1689    0.1618    0.1851      0.7553     2.252
+worst-tracked joint : FR_calf_joint (max |q-cmd| 0.8896 rad)
