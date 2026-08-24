@@ -22,8 +22,32 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 BASE = Path(__file__).resolve().parent
-REF = BASE / "hopscotch_utils" / "trajectories.npz"
+# Fallback only; schedule() derives these from TRAJ when it carries the contact data.
 FLIGHTS_S = ((0.40, 0.70), (1.10, 1.40), (1.90, 2.20), (2.70, 3.00))
+LANDINGS_MS = (700, 1400, 2200, 3000)
+BASE_ = BASE
+# Stacked like render.py: the LAST uncommented line wins -- comment to switch trajectory.
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_long_stride.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_two_leg2.npz"
+TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+
+
+def schedule():
+    """(landings_ms, flights_s) from TRAJ's contact passthrough; module constants if absent."""
+    f = np.load(TRAJ)
+    if "impact_times" not in f.files or "contact" not in f.files:
+        return LANDINGS_MS, FLIGHTS_S
+    land = tuple(int(round(1e3 * float(t))) for t in np.asarray(f["impact_times"]).ravel())
+    air = np.flatnonzero(np.asarray(f["contact"]).sum(1) == 0)
+    if not air.size:
+        return land, ()
+    return land, tuple((int(g[0]) / 1e3, (int(g[-1]) + 1) / 1e3)
+                       for g in np.split(air, np.flatnonzero(np.diff(air) > 1) + 1))
+
+
+REF = TRAJ
+LANDINGS_MS, FLIGHTS_S = schedule()
 
 
 def quat_mul(a, b):

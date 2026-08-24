@@ -12,8 +12,33 @@ LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "run_log.npz"
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else LOG.with_name(LOG.stem + "_feet.png")
 FEET = ("FL", "FR", "RL", "RR")
 MIN_CLEARANCE = 0.045
+# Fallbacks only; schedule() derives these from TRAJ when it carries the contact data.
 LANDINGS_MS = (700, 1400, 2200, 3000)
 TAKEOFFS_MS = (400, 1100, 1900, 2700)
+FLIGHTS_S = tuple((a / 1e3, b / 1e3) for a, b in zip(TAKEOFFS_MS, LANDINGS_MS))
+BASE_ = HERE
+# Stacked like render.py: the LAST uncommented line wins -- comment to switch trajectory.
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_long_stride.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_two_leg2.npz"
+TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+
+
+def schedule():
+    """(landings_ms, flights_s) from TRAJ's contact passthrough; module constants if absent."""
+    f = np.load(TRAJ)
+    if "impact_times" not in f.files or "contact" not in f.files:
+        return LANDINGS_MS, FLIGHTS_S
+    land = tuple(int(round(1e3 * float(t))) for t in np.asarray(f["impact_times"]).ravel())
+    air = np.flatnonzero(np.asarray(f["contact"]).sum(1) == 0)
+    if not air.size:
+        return land, ()
+    return land, tuple((int(g[0]) / 1e3, (int(g[-1]) + 1) / 1e3)
+                       for g in np.split(air, np.flatnonzero(np.diff(air) > 1) + 1))
+
+
+LANDINGS_MS, _FL = schedule()
+TAKEOFFS_MS = tuple(int(round(1e3 * a)) for a, _ in _FL)
 
 HIP_XYZ = np.array([[0.1934, 0.0465, 0.0], [0.1934, -0.0465, 0.0],
                     [-0.1934, 0.0465, 0.0], [-0.1934, -0.0465, 0.0]])
@@ -44,7 +69,7 @@ def feet_in_base(q):
 
 def reference_clearance():
     """Clearance of the reference itself; same identity the controller uses (radius cancels)."""
-    f = np.load(HERE / "hopscotch_utils" / "trajectories.npz")
+    f = np.load(TRAJ)
     X = f["x_refs"]
     X = X[0] if X.ndim == 3 else X
     out = np.empty((len(X), 4))

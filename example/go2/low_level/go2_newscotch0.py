@@ -674,6 +674,19 @@ class Custom:
                 self.low_cmd.motor_cmd[idx].kd = self.Kd
                 self.low_cmd.motor_cmd[idx].tau = 0
 
+        elif (self.hold_percent >= 1) and (self.ii >= self.traj_end):
+
+            # Settle finished: keep standing on the reference's final pose until the main
+            # thread is released. The control thread must go on publishing, so this restates
+            # the command every tick rather than leaning on the last one still being in place.
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(self.qf[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp
+                self.low_cmd.motor_cmd[idx].kd = self.Kd
+                self.low_cmd.motor_cmd[idx].tau = 0
+
         if self.publish:
             self.low_cmd.crc = self.crc.Crc(self.low_cmd)
             self.lowcmd_publisher.Write(self.low_cmd)
@@ -726,5 +739,7 @@ if __name__ == '__main__':
                print(f"tracking: joint err rms {np.sqrt((qerr ** 2).mean()):.4f} max {np.abs(qerr).max():.4f} rad, "
                      f"quat err max {np.abs(querr).max():.4f}")
            print("Done!")
+           # LowCmdWrite keeps holding qf on its own thread while this blocks.
+           input("holding stance -- press Enter to release...")
            sys.exit(-1)
         time.sleep(1)

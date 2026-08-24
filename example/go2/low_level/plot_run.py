@@ -10,7 +10,34 @@ LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else BASE / "run_log.npz"
 PREFIX = Path(sys.argv[2]) if len(sys.argv) > 2 else LOG.with_suffix("")
 JOINTS = [f"{leg} {j}" for leg in ("FL", "FR", "RL", "RR") for j in ("hip", "thigh", "calf")]
 TAU_LIMIT = np.array([23.7, 23.7, 45.43] * 4)
+# Fallback only; schedule() derives these from TRAJ when it carries the contact data.
 FLIGHTS_S = ((0.40, 0.70), (1.10, 1.40), (1.90, 2.20), (2.70, 3.00))
+LANDINGS_MS = (700, 1400, 2200, 3000)
+BASE_ = BASE
+# Stacked like render.py: the LAST uncommented line wins -- comment to switch trajectory.
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_long_stride.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_two_leg2.npz"
+TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+
+
+def schedule():
+    """(landings_ms, flights_s) from TRAJ's contact passthrough; module constants if absent."""
+    f = np.load(TRAJ)
+    if "impact_times" not in f.files or "contact" not in f.files:
+        return LANDINGS_MS, FLIGHTS_S
+    land = tuple(int(round(1e3 * float(t))) for t in np.asarray(f["impact_times"]).ravel())
+    air = np.flatnonzero(np.asarray(f["contact"]).sum(1) == 0)
+    if not air.size:
+        return land, ()
+    return land, tuple((int(g[0]) / 1e3, (int(g[-1]) + 1) / 1e3)
+                       for g in np.split(air, np.flatnonzero(np.diff(air) > 1) + 1))
+
+
+def contact_plan_npz(path):
+    """Planned per-foot contact force (T,4,3) from an npz lam: 4 feet x 6D wrench, force first."""
+    lam = np.asarray(np.load(path)["lam"], float)
+    return np.stack([lam[:, 6 * i:6 * i + 3] for i in range(4)], axis=1)
 
 
 def load_contact_plan(path):
@@ -41,10 +68,12 @@ def quat2eul(q):
         np.arctan2(-(2 * (x * y - w * z)), 1 - 2 * (y * y + z * z))], axis=-1))
 
 
-f = np.load(BASE / "hopscotch_utils" / "trajectories.npz")
+f = np.load(TRAJ)
 X = f["x_refs"]
 if X.ndim == 3:
     X = X[0]
+
+LANDINGS_MS, FLIGHTS_S = schedule()
 
 S = np.load(LOG)["state"]
 ti = S[:, 0].astype(int)
@@ -68,8 +97,15 @@ mocap_seq = S[:, 82] if has_mocap else None
 pos_r = X[ti, :3]
 FEET = ("FL", "FR", "RL", "RR")
 if has_foot:
+    # The old hopscotch ships a per-mode JSON; newer references carry lam in the npz.
     TRAJ_JSON = BASE / "hopscotch_utils" / "traj_hopscotch_friction_6cm_lsq.json"
-    plan_F = load_contact_plan(TRAJ_JSON)[ti] if TRAJ_JSON.exists() else None
+    src = np.load(TRAJ)
+    if TRAJ.name == "trajectories.npz" and TRAJ_JSON.exists():
+        plan_F = load_contact_plan(TRAJ_JSON)[ti]
+    elif "lam" in src.files:
+        plan_F = contact_plan_npz(TRAJ)[ti]
+    else:
+        plan_F = None
     plan_c = plan_F[:, :, 2] > 1.0 if plan_F is not None else None
     # foot_force is uncalibrated: threshold at a fraction of this run's own range.
     foot_c = foot > (0.15 * np.nanmax(foot) if np.nanmax(foot) > 0 else np.inf)
