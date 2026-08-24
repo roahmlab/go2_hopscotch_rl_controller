@@ -548,6 +548,11 @@ class Custom:
 
         elif not self.go:
 
+            # CalibrateMocap() wants >=50 samples inside the last 1.0 s, so the buffer has to
+            # keep filling through an open-ended wait or the frame goes stale and it aborts.
+            if self.use_mocap:
+                self._cal_append()
+
             # Aligned, warm and holding: stand on q0 with the torque the hold converged to,
             # until the main thread releases us. Restated every tick so the control loop
             # keeps publishing while that thread blocks on input(). tau_i is held rather
