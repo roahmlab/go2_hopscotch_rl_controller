@@ -87,6 +87,8 @@ class Custom:
 
         self.settle_s = 2.0
         self.settle_percent = 0
+        # set by the main thread once the operator confirms; gates the trajectory
+        self.go = False
 
         base_dir = os.path.join(os.path.dirname(__file__), ".")
 
@@ -544,6 +546,20 @@ class Custom:
                 print(f"{tag} err vs q0: " + np.array2string(err, precision=3, suppress_small=True)
                       + f"  max|err|: {np.max(np.abs(err)):.3f}", flush=True)
 
+        elif not self.go:
+
+            # Aligned, warm and holding: stand on q0 with the torque the hold converged to,
+            # until the main thread releases us. Restated every tick so the control loop
+            # keeps publishing while that thread blocks on input(). tau_i is held rather
+            # than integrated further -- the wait is open-ended and would wind it up.
+            for i in range(12):
+                idx = self.JOINT_REORDERING[i]
+                self.low_cmd.motor_cmd[idx].q = float(self.q0[i])
+                self.low_cmd.motor_cmd[idx].dq = 0
+                self.low_cmd.motor_cmd[idx].kp = self.Kp_stand
+                self.low_cmd.motor_cmd[idx].kd = self.Kd_stand
+                self.low_cmd.motor_cmd[idx].tau = float(self.tau_i[i])
+
         elif (self.hold_percent >= 1) and (self.ii < self.traj_end):
 
             if self.use_mocap and self.mocap_zero is None:
@@ -703,6 +719,7 @@ if __name__ == '__main__':
         custom.fold_percent = 1
         custom.alignment_percent = 1
         custom.hold_percent = 1
+        custom.go = True
         custom.Start()
         time.sleep(8)
         sys.exit(0)
@@ -718,6 +735,12 @@ if __name__ == '__main__':
     custom = Custom()
     custom.Init()
     custom.Start()
+
+    while custom.hold_percent < 1:
+        time.sleep(0.1)
+    # LowCmdWrite holds q0 on its own thread while this blocks.
+    input("aligned and holding -- press Enter to run the trajectory...")
+    custom.go = True
 
     while True:
         if custom.settle_percent >= 1:
