@@ -187,6 +187,7 @@ class Custom:
         self.tau_limit = np.array([23.7, 23.7, 45.43] * 4)
 
         # Mocap channel (written as ONE tuple by the mocap thread; tuple reads are atomic).
+        self.bench = False                # synthesizes mocap so bench needs no bridge
         self.mocap_sample = None          # (t_recv, fnum, p_raw_m(3,), quat(4,) or None)
         self.mocap_zero = None            # p_zero(3,) after calibration
         self.mocap_R = None               # 2x2 Rz(-yaw0) for the xy frame fit
@@ -339,6 +340,11 @@ class Custom:
 
     def DrainMocap(self):
         """Empties the socket, keeping the newest datagram. Non-blocking; measured 45 us median, 140 us worst."""
+        if self.bench:
+            i = min(self.ii, self.traj_length)
+            self.mocap_sample = (time.perf_counter(), i,
+                                 self.x_ref[i, :3] - self.x_ref[0, :3], None)
+            return self.mocap_sample
         got = None
         while True:
             try:
@@ -728,6 +734,9 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "bench":
         custom = Custom()
         custom.publish = False
+        custom.bench = True
+        custom.mocap_zero = np.zeros(3)
+        custom.mocap_R = np.eye(2)
         custom.InitLowCmd()
         custom.low_state = unitree_go_msg_dds__LowState_()
         custom.fold_percent = 1
