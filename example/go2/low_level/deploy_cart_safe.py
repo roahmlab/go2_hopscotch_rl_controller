@@ -1105,12 +1105,12 @@ class Custom(_base.Custom):
 def _build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--checkpoint",default="hopscotch_utils/model_7400.pt", required=False,
+        "--checkpoint",default="hopscotch_utils/v2s_7200.pt", required=False,
         help="cartwheel kinematic checkpoint; meta.json is discovered beside it",
     )
-    parser.add_argument("--meta", default="hopscotch_utils/cart_meta.json", help="override sibling meta.json")
+    parser.add_argument("--meta", default="hopscotch_utils/v2s_meta.json", help="override sibling meta.json")
     parser.add_argument(
-        "--traj", default="hopscotch_utils/cart_retarget_v2.npz",
+        "--traj", default="hopscotch_utils/cart.npz",
         help="explicit trajectory override; relative paths are resolved from cwd",
     )
     parser.add_argument(
