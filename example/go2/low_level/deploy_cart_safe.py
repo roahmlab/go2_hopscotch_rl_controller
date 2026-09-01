@@ -1105,12 +1105,12 @@ class Custom(_base.Custom):
 def _build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--checkpoint", required=True,
+        "--checkpoint",default="hopscotch_utils/model_7400.pt", required=False,
         help="cartwheel kinematic checkpoint; meta.json is discovered beside it",
     )
-    parser.add_argument("--meta", default=None, help="override sibling meta.json")
+    parser.add_argument("--meta", default="hopscotch_utils/cart_meta.json", help="override sibling meta.json")
     parser.add_argument(
-        "--traj", default=None,
+        "--traj", default="hopscotch_utils/cart_retarget_v2.npz",
         help="explicit trajectory override; relative paths are resolved from cwd",
     )
     parser.add_argument(
@@ -1123,12 +1123,12 @@ def _build_parser():
         help="hardware cap on the phase-aware training orientation wall (0,180]",
     )
     parser.add_argument(
-        "--ori-stance-deg", type=float, default=None,
+        "--ori-stance-deg", type=float, default=90,
         help="explicitly override meta term_ori_err; values above training allow "
              "untrained divergence states",
     )
     parser.add_argument(
-        "--flight-ori-mult", type=float, default=None,
+        "--flight-ori-mult", type=float, default=1,
         help="override meta/default planned-flight multiplier (default 1.6 if absent)",
     )
     parser.add_argument(
