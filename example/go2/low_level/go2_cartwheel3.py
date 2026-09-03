@@ -55,7 +55,7 @@ class Custom:
         self.Kd_stand = 5.0
 
         # dt and stride come from the checkpoint's ctrl_decim (set after the actor loads).
-        self.traj_end = 5500
+        self.traj_end = 5590
 
 
         self.ii = 0
@@ -113,7 +113,7 @@ class Custom:
         self.sat_cnt = 0
 
         # Load reference trajectory
-        f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories_cartwheel.npz"))
+        f = np.load(os.path.join(base_dir, "hopscotch_utils", "trajectories_cartwheel_v7.npz"))
         x_ref, u_ref = f["x_refs"], f["u_refs"]
         if x_ref.ndim == 3:
             x_ref, u_ref = x_ref[0], u_ref[0]
