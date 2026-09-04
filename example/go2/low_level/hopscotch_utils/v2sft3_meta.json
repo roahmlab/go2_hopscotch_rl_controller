@@ -1,0 +1,225 @@
+{
+  "control_mode": "kinematic",
+  "kin_anchor": "home",
+  "kin_anchor_qd": false,
+  "obs_act_hist": true,
+  "q_home": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.8999999761581421,
+    0.8999999761581421,
+    0.8999999761581421,
+    0.8999999761581421,
+    -1.7999999523162842,
+    -1.7999999523162842,
+    -1.7999999523162842,
+    -1.7999999523162842
+  ],
+  "act_lpf_beta": 0.7,
+  "jlimit_clamp_frac": 0.97,
+  "joint_names": [
+    "FL_hip_joint",
+    "FR_hip_joint",
+    "RL_hip_joint",
+    "RR_hip_joint",
+    "FL_thigh_joint",
+    "FR_thigh_joint",
+    "RL_thigh_joint",
+    "RR_thigh_joint",
+    "FL_calf_joint",
+    "FR_calf_joint",
+    "RL_calf_joint",
+    "RR_calf_joint"
+  ],
+  "compliant_feet": false,
+  "traj_path": "/home/vansht/geni/rl-res/cart_retarget_v2.npz",
+  "ff_damping_comp": 0.0,
+  "ff_armature_comp": 0.0,
+  "kp": 60.0,
+  "kd": 1.5,
+  "action_scale": 1.7,
+  "hold_targets": true,
+  "use_motor_model": true,
+  "mdc": {
+    "Vbat": 28.8,
+    "Pbat": 1728.0,
+    "gr": 6.33,
+    "Kt": 0.26,
+    "Kv": 3.846153846153846,
+    "R": 0.66
+  },
+  "obs_history_len": 10,
+  "preview_steps": 5,
+  "num_future": 2,
+  "clip_obs": 10.0,
+  "priv_v2": true,
+  "obs_o1_scale": true,
+  "rsi_t0_frac": 0.3,
+  "obs_ori_err": true,
+  "obs_velest": false,
+  "odom_clamp": 0.5,
+  "obs_contact_prev": true,
+  "obs_contact_blind": true,
+  "obs_tau_mode": "cmd",
+  "sysid_set": "sysid2",
+  "obs_priv_base": false,
+  "sensor_dr": false,
+  "dr_kpkd_off": false,
+  "dr_sched_override": {
+    "mass": [
+      1.0,
+      1.45
+    ],
+    "inertia": [
+      1.0,
+      1.35
+    ],
+    "kp_scale": [
+      0.7,
+      1.05
+    ],
+    "kd_scale": [
+      0.7,
+      1.05
+    ]
+  },
+  "dr_com_box": [
+    [
+      -0.09,
+      -0.03
+    ],
+    [
+      -0.02,
+      0.02
+    ],
+    [
+      0.0,
+      0.08
+    ]
+  ],
+  "sysid_nominal": true,
+  "observation_space": 723,
+  "state_space": 762,
+  "action_space": 12,
+  "phase_scale": 0.04,
+  "phase_ema": 0.5,
+  "term_contact": [
+    false,
+    10.0,
+    3,
+    0.06,
+    1.0,
+    200,
+    30.0
+  ],
+  "term_knee": [
+    true,
+    0.025,
+    3
+  ],
+  "curriculum": {
+    "ignore_wall_kills": false,
+    "dr_start": 1.0,
+    "dr_freeze": true
+  },
+  "push_dr": [
+    true,
+    2,
+    0.3,
+    0.8
+  ],
+  "rsi_adaptive": [
+    false,
+    0.01,
+    25,
+    0.9,
+    0.1
+  ],
+  "kin_weights": {
+    "w_qvel": 0.5,
+    "w_linvel": 1.0,
+    "w_foot": 1.0,
+    "k_foot": 30.0,
+    "w_act_rate": 0.5,
+    "w_act_accel": 0.25,
+    "w_torque": 0.0002,
+    "w_jlimit": 1.0,
+    "w_qdlimit": 0.02,
+    "init_noise_std": 0.25,
+    "w_base_z_air": 1.0,
+    "k_base_z_air": 1000.0,
+    "w_pos_rent": [
+      0.0,
+      0.0,
+      0.1
+    ],
+    "w_support": 0.0,
+    "support_minload": 0.3,
+    "kernel_iters": 125,
+    "wjoint_early": 1.0,
+    "w_knee": 1.0,
+    "knee_z": 0.05,
+    "knee_s": 0.03,
+    "w_jtail": 0.15,
+    "jtail_s": 0.3
+  },
+  "contact_plan_objective": {
+    "weight": 0.0,
+    "force_threshold_n": 10.0,
+    "edge_grace_s": 0.06,
+    "diag_balance_weight": 0.0,
+    "diag_balance_margin_m": 0.02,
+    "diag_balance_scale_m": 0.02,
+    "diag_balance_lookahead_s": 0.12,
+    "swing_height_weight": 0.0,
+    "swing_height_target_m": 0.06,
+    "swing_height_scale_m": 0.02
+  },
+  "terrain_noise": 0.005,
+  "physics_hz": 200,
+  "solver_iters": null,
+  "max_depen": null,
+  "kin_tau_ff": 0.0,
+  "mocap_only": true,
+  "self_collisions": true,
+  "episode_length_s": 9.7,
+  "ep_tail": 4.0,
+  "max_gravity_z": 0.6,
+  "qd_limit_kin": 28.0,
+  "term_ori_err": 0.8,
+  "term_pos_err": 0.35,
+  "rsi_perturb": {
+    "theta": 0.10471975511965978,
+    "omega": 0.5,
+    "q": 0.05,
+    "v": 0.3
+  },
+  "dr_calf": {
+    "arm": null,
+    "fc": null,
+    "fv": null,
+    "tq": null,
+    "beta": null
+  },
+  "std_floor": [
+    0.05
+  ],
+  "track_weights": {
+    "w_ori": 1.5,
+    "k_ori": 4.0,
+    "w_yaw": 1.0,
+    "k_yaw": 4.0,
+    "w_base_xy": 1.5,
+    "w_base_z": 1.0,
+    "w_joint_hi": 1.0,
+    "w_angvel": 0.5,
+    "k_angvel": 0.5,
+    "w_omtail": 0.0,
+    "omtail_s": 2.0,
+    "w_alive": 0.0,
+    "w_landing": 0.0,
+    "w_jump_attempt": 0.0
+  }
+}
