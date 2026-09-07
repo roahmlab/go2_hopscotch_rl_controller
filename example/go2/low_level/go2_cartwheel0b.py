@@ -45,6 +45,46 @@ def quat2eul(q):
     return np.array([np.arctan2(-r12, r22), np.arcsin(np.clip(r02, -1, 1)), np.arctan2(-r01, r00)])
 
 
+# Go2 leg kinematics from the URDF: hip about x at the trunk, thigh and calf about y.
+HIP_XY = np.array([[0.1934, 0.0465], [0.1934, -0.0465],
+                   [-0.1934, 0.0465], [-0.1934, -0.0465]])
+THIGH_Y = np.array([0.0955, -0.0955, 0.0955, -0.0955])
+LINK = 0.213
+GRAVITY = 9.81
+
+
+def rot_x(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def rot_y(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def quat2mat(q):
+    """Rotation matrix of a w-first unit quaternion."""
+    w, x, y, z = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def feet_body(q12):
+    """Foot positions in the base frame, MuJoCo leg order FL, FR, RL, RR."""
+    out = np.zeros((4, 3))
+    for k in range(4):
+        qh, qt, qc = q12[3 * k], q12[3 * k + 1], q12[3 * k + 2]
+        Rh = rot_x(qh)
+        p = np.array([HIP_XY[k, 0], HIP_XY[k, 1], 0.0]) + Rh @ np.array([0.0, THIGH_Y[k], 0.0])
+        Rt = Rh @ rot_y(qt)
+        p = p + Rt @ np.array([0.0, 0.0, -LINK])
+        Rc = Rt @ rot_y(qc)
+        out[k] = p + Rc @ np.array([0.0, 0.0, -LINK])
+    return out
+
+
 class Custom:
     def __init__(self):
         self.Kp = 60.0
@@ -123,6 +163,9 @@ class Custom:
         self.ref_feat = np.concatenate(
             [self.x_ref[:, 3:7], self.x_ref[:, 7:19], self.x_ref[:, 22:25], self.x_ref[:, 25:37]],
             axis=1)
+        if "contact" not in f.files:
+            raise KeyError("0b needs the reference contact schedule (npz key 'contact')")
+        self.contact_ref = np.asarray(f["contact"]) > 0
 
         # Load the actor; checkpoint metadata selects architecture, gains and observation layout.
         self.blind = "actor_cartwheel0.pkl"
@@ -201,6 +244,27 @@ class Custom:
         self.p_raw = np.full(3, np.nan)
         self.mocap_age = np.nan
         self.mocap_seq = -1
+
+        # Phase-aware dropout fallback: leg odometry while planted, ballistic while airborne.
+        self.mocap_gap_t0 = None          # perf_counter at the start of the current dropout
+        self.mocap_gap_max = 0.4          # s of dead reckoning before the damping fault
+        self.mocap_gap_worst = 0.0
+        self.mocap_gap_count = 0
+        self.mocap_jump_max = 0.10        # m per tick, plus 2.5 m/s of allowance since the last accept
+        self.mocap_accept_t = None
+        self.mocap_reject = 0
+        self.mocap_repeat_run = 0         # consecutive ticks with the same frame number
+        self.low_state_t = time.perf_counter()
+        self.low_state_max_age = 0.03     # s without a LowState before the damping fault
+        self.odom_p = None                # last trusted base position, reference frame
+        self.odom_v = np.zeros(3)
+        self.odom_t = None
+        self.odom_anchor = None           # (4,3) world foot positions held through a gap
+        self.odom_anchor_down = np.zeros(4, dtype=bool)
+        self.odom_flight_t0 = None
+        self.odom_flight_p = None
+        self.odom_flight_v = None
+        self.odom_code = 0                # 0 mocap, 1 stance odometry, 2 ballistic
 
         # MuJoCo: [FL, FR, RL, RR]
         # Unitree Go2: [FR, FL, RR, RL]
@@ -391,6 +455,7 @@ class Custom:
 
     def LowStateMessageHandler(self, msg: LowState_):
         self.low_state = msg
+        self.low_state_t = time.perf_counter()
 
     def _cal_append(self):
         s = self.mocap_sample
@@ -435,22 +500,73 @@ class Custom:
         return True
 
     def MocapPosition(self, now):
-        """Latest mocap in the reference frame, or None past the staleness limit."""
+        """Latest mocap in the reference frame, or None if stale, repeated, or physically implausible."""
         s = self.mocap_sample
         if s is None or now - s[0] > self.mocap_max_age:
             return None
         if s[1] == self.mocap_last_fnum:
             self.mocap_repeat += 1
+            self.mocap_repeat_run += 1
+        else:
+            self.mocap_repeat_run = 0
         self.mocap_last_fnum = s[1]
+        if self.mocap_repeat_run >= 2:
+            return None
         delta = s[2] - self.mocap_zero
         xy = self.mocap_R @ delta[:2]
+        # Anchored to this script's own x_ref[0], so the trainer's REF_Z_OFFSET cancels;
+        # do not "fix" the offset here or in the trainer alone.
+        p = self.x_ref[0, :3] + np.array([xy[0], xy[1], delta[2]])
+        if self.odom_p is not None and self.mocap_accept_t is not None:
+            allowed = self.mocap_jump_max + 2.5 * (now - self.mocap_accept_t)
+            if np.linalg.norm(p - self.odom_p) > allowed:
+                self.mocap_reject += 1
+                return None
+        self.mocap_accept_t = now
         self.p_raw = s[2]
         self.mocap_age = now - s[0]
         self.mocap_age_max = max(self.mocap_age_max, self.mocap_age)
         self.mocap_seq = s[1]
-        # Anchored to this script's own x_ref[0], so the trainer's REF_Z_OFFSET cancels;
-        # do not "fix" the offset here or in the trainer alone.
-        return self.x_ref[0, :3] + np.array([xy[0], xy[1], delta[2]])
+        return p
+
+    def OdomPush(self, now, p):
+        """Advances the base position and its low-passed velocity with a new position sample."""
+        if self.odom_t is not None:
+            dt = now - self.odom_t
+            if dt > 1e-4:
+                a = min(1.0, dt / 0.02)
+                self.odom_v = self.odom_v + a * ((p - self.odom_p) / dt - self.odom_v)
+        self.odom_p, self.odom_t = p, now
+
+    def OdomAnchor(self, base_quat, dof_pos, planted):
+        """Pins the scheduled stance feet in world coordinates so a dropout can solve the base back out."""
+        self.odom_anchor = self.odom_p + feet_body(dof_pos) @ quat2mat(base_quat).T
+        self.odom_anchor_down = planted
+        self.odom_flight_t0 = None
+
+    def EstimateBase(self, now, base_quat, dof_pos, planted):
+        """Base position during a dropout: leg odometry on the scheduled stance feet, ballistic in flight."""
+        fb = feet_body(dof_pos) @ quat2mat(base_quat).T
+        if planted.any():
+            use = planted & self.odom_anchor_down
+            if not use.any():
+                self.odom_anchor = self.odom_p + fb
+                use = planted
+            p = np.mean(self.odom_anchor[use] - fb[use], axis=0)
+            self.odom_code = 1
+            self.OdomPush(now, p)
+            self.OdomAnchor(base_quat, dof_pos, planted)
+            return p
+        if self.odom_flight_t0 is None:
+            self.odom_flight_t0, self.odom_flight_p = now, self.odom_p
+            self.odom_flight_v = self.odom_v.copy()
+        dt = now - self.odom_flight_t0
+        p = (self.odom_flight_p + self.odom_flight_v * dt
+             + np.array([0.0, 0.0, -0.5 * GRAVITY * dt * dt]))
+        self.odom_code = 2
+        self.odom_p, self.odom_t = p, now
+        self.odom_v = self.odom_flight_v + np.array([0.0, 0.0, -GRAVITY * dt])
+        return p
 
     def LowCmdWrite(self):
 
@@ -470,7 +586,9 @@ class Custom:
             if self.n_tick % 200 == 0:
                 mtail = (f" | mocap drain max {1e3 * self.mocap_drain_max:.3f} "
                          f"age max {1e3 * self.mocap_age_max:.1f} ms "
-                         f"repeat {self.mocap_repeat}" if self.use_mocap else "")
+                         f"repeat {self.mocap_repeat} gaps {self.mocap_gap_count} "
+                         f"worst {1e3 * self.mocap_gap_worst:.0f} ms rejects {self.mocap_reject}"
+                         if self.use_mocap else "")
                 print(f"tick avg {1e3 * self.tick_sum / 200:.2f} max {1e3 * self.tick_max:.2f} ms | "
                       f"inference avg {1e3 * self.inf_sum / 200:.2f} max {1e3 * self.inf_max:.2f} ms | "
                       f"sat {self.sat_cnt}/200 peak {self.sat_peak:.2f}x{mtail}", flush=True)
@@ -596,16 +714,28 @@ class Custom:
 
             inf_t0 = time.perf_counter()
 
+            if inf_t0 - self.low_state_t > self.low_state_max_age:
+                self.fault = True
+                print(f"FAULT: LowState stale {1e3 * (inf_t0 - self.low_state_t):.0f} ms at "
+                      f"ii={self.ii}, entering damping mode", flush=True)
+                return
+
             if self.use_mocap:
                 p_meas = self.MocapPosition(inf_t0)
                 if p_meas is None:
-                    self.fault = True
-                    s = self.mocap_sample
-                    age = "none" if s is None else f"{1e3 * (inf_t0 - s[0]):.0f} ms"
-                    print(f"FAULT: mocap stale ({age}) at ii={self.ii}, entering damping mode",
-                          flush=True)
-                    return
-                self.p_meas = p_meas
+                    if self.mocap_gap_t0 is None:
+                        self.mocap_gap_t0 = inf_t0
+                        self.mocap_gap_count += 1
+                    gap = inf_t0 - self.mocap_gap_t0
+                    self.mocap_gap_worst = max(self.mocap_gap_worst, gap)
+                    if gap > self.mocap_gap_max or self.odom_p is None:
+                        self.fault = True
+                        why = "no anchor" if self.odom_p is None else f"{1e3 * gap:.0f} ms"
+                        print(f"FAULT: mocap gap {why} at ii={self.ii}, entering damping mode",
+                              flush=True)
+                        return
+                else:
+                    self.mocap_gap_t0 = None
 
             # current
             dof_pos = np.array([self.low_state.motor_state[i].q for i in range(12)])
@@ -631,6 +761,16 @@ class Custom:
                 self.gyro_f = gyro_raw
             self.gyro_f = self.gyro_f + self.gyro_alpha * (gyro_raw - self.gyro_f)
             ang_vel_body = self.gyro_f
+
+            if self.use_mocap:
+                planted = self.contact_ref[min(self.ii, len(self.contact_ref) - 1)]
+                if p_meas is not None:
+                    self.odom_code = 0
+                    self.OdomPush(inf_t0, p_meas)
+                    self.OdomAnchor(base_quat, dof_pos, planted)
+                    self.p_meas = p_meas
+                else:
+                    self.p_meas = self.EstimateBase(inf_t0, base_quat, dof_pos, planted)
 
             x = np.zeros(37)
             x[3:7] = base_quat
@@ -693,7 +833,7 @@ class Custom:
             self.log_state.append(np.concatenate([[self.ii], dof_pos, dof_vel, base_quat,
                                                   ang_vel_body, v, tau_meas, total, accel,
                                                   foot_force, self.p_meas, self.p_raw,
-                                                  [self.mocap_age, self.mocap_seq]]))
+                                                  [self.mocap_age, self.mocap_seq, self.odom_code]]))
 
             self.ii += self.stride
 
@@ -772,7 +912,7 @@ if __name__ == '__main__':
                     align=np.array(custom.log_align), inf=np.array(custom.log_inf),
                     state=np.array(custom.log_state), sat=np.array(custom.log_sat),
                     layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3,foot4,"
-                           "mocap3,mocap_raw3,mocap_age1,mocap_seq1")
+                           "mocap3,mocap_raw3,mocap_age1,mocap_seq1,odom_src1")
            for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
                a = 1e3 * np.array(a)
                print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
