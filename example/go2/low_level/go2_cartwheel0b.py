@@ -231,6 +231,7 @@ class Custom:
 
         # Mocap channel (written as ONE tuple by the mocap thread; tuple reads are atomic).
         self.bench = False                # synthesizes mocap so bench needs no bridge
+        self.bench_fnum = 0
         self.mocap_sample = None          # (t_recv, fnum, p_raw_m(3,), quat(4,) or None)
         self.mocap_zero = None            # p_zero(3,) after calibration
         self.mocap_R = None               # 2x2 Rz(-yaw0) for the xy frame fit
@@ -406,8 +407,10 @@ class Custom:
         """Empties the socket, keeping the newest datagram. Non-blocking; measured 45 us median, 140 us worst."""
         if self.bench:
             i = min(self.ii, self.traj_length)
-            self.mocap_sample = (time.perf_counter(), i,
-                                 self.x_ref[i, :3] - self.x_ref[0, :3], None)
+            self.bench_fnum += 1
+            self.mocap_sample = (time.perf_counter(), self.bench_fnum,
+                                 self.x_ref[i, :3] - self.x_ref[0, :3],
+                                 np.array([1.0, 0.0, 0.0, 0.0]))
             return self.mocap_sample
         got = None
         while True:
@@ -871,17 +874,23 @@ class Custom:
 
 if __name__ == '__main__':
 
-    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+    if len(sys.argv) > 1 and sys.argv[1] in ("bench", "bench-mocap"):
         custom = Custom()
         custom.publish = False
-        custom.bench = True
-        custom.mocap_zero = np.zeros(3)
-        custom.mocap_R = np.eye(2)
+        custom.bench = sys.argv[1] == "bench"           # bench-mocap: real bridge, motors off
+        custom.low_state_max_age = float("inf")         # no DDS feed on the bench
         custom.InitLowCmd()
         custom.low_state = unitree_go_msg_dds__LowState_()
         custom.fold_percent = 1
         custom.alignment_percent = 1
         custom.hold_percent = 1
+        if custom.use_mocap and not custom.bench:
+            custom.InitMocap()
+        t0 = time.perf_counter()
+        while custom.use_mocap and time.perf_counter() - t0 < 1.2:   # stands in for the hold
+            custom.DrainMocap()
+            custom._cal_append()
+            time.sleep(0.008)
         custom.go = True
         custom.Start()
         time.sleep(8)
