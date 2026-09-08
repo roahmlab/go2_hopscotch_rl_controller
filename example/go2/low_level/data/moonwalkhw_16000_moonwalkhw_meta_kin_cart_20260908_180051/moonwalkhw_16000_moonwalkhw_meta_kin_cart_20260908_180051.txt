@@ -1,0 +1,35 @@
+run          : moonwalkhw_16000_moonwalkhw_meta_kin_cart
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/moonwalkhw_16000.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/moonwalkhw_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/cart.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (orientation error 91.4 deg exceeds 90.0 deg (stance) at t=2.54)   128/475 ticks, 2.54/9.48 s
+geodesic ori error: RMS 24.96 deg, max 91.41 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    51.50°   171.24°  145.63°
+  pitch    12.57°    38.05°   31.09°
+    yaw    54.71°   172.35° -112.76°
+
+worst tilt (grav_z) : +0.521
+orientation walls    : 90.0 deg stance / 90.0 deg flight, cap 180.0 deg; grav_z 0.65; upright fallback on
+|action| mean/max   : 0.338 / 1.000
+action saturation   : 3.1% of joint-ticks
+jitter (mrad/tick)  : 84.5   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -    -20   +140
+    takeoff   2.10s      ?      ?      -      -
+  touchdown   2.36s    n/a    n/a      -      -
+
+diag swing-foot touches: 7 tick-feet, median force 29 max 44 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.2984    0.1180    0.3223      0.9200     2.361
+  thigh    0.2897    0.2142    0.3812      1.6158     3.036
+   calf    0.3183    0.2128    0.3671      1.0188     3.066
+    all    0.3023    0.1872    0.3578      1.6158     2.840
+worst-tracked joint : FR_thigh_joint (max |q-cmd| 1.0085 rad)

@@ -245,7 +245,7 @@ def _build_parser():
     parser = _safe_build_parser()
     # The safe script defaults to a specific stock checkpoint/meta/trajectory; a latent
     # deployment must name its checkpoint, with meta.json and traj_path resolved from it.
-    parser.set_defaults(checkpoint="lat_utils/v0c_17598.pt", meta="lat_utils/v0c_meta.json", traj="hopscotch_utils/cart.npz")
+    parser.set_defaults(checkpoint="lat_utils/moonwalkhwpin_15600.pt", meta="lat_utils/moonwalkhwpin_meta.json", traj="hopscotch_utils/cart.npz")
     for action in parser._actions:
         if action.dest == "checkpoint":
             action.required = False

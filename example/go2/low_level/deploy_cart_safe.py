@@ -524,7 +524,8 @@ class Custom(_base.Custom):
         self.flight_ori_mult = _finite_scalar(
             "flight orientation multiplier", flight_ori_mult, lo=1.0
         )
-        self.max_gravity_z = float(meta["max_gravity_z"])
+        #self.max_gravity_z = float(meta["max_gravity_z"])
+        self.max_gravity_z = 0.65
         self.upright_fallback = bool(upright_fallback)
         self._current_ori_limit_deg = min(self.ori_stance_deg, self.abort_ori_cap_deg)
         self.abort_ori_deg = self._current_ori_limit_deg
@@ -1123,7 +1124,7 @@ def _build_parser():
         help="hardware cap on the phase-aware training orientation wall (0,180]",
     )
     parser.add_argument(
-        "--ori-stance-deg", type=float, default=90,
+        "--ori-stance-deg", type=float, default=95,
         help="explicitly override meta term_ori_err; values above training allow "
              "untrained divergence states",
     )

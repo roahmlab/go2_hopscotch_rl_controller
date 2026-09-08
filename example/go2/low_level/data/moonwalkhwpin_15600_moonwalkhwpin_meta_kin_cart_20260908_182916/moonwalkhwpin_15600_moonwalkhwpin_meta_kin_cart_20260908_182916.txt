@@ -1,0 +1,37 @@
+run          : moonwalkhwpin_15600_moonwalkhwpin_meta_kin_cart
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/moonwalkhwpin_15600.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/moonwalkhwpin_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/cart.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (grav_z 0.722 exceeds global wall 0.650 at t=3.38)   170/475 ticks, 3.38/9.48 s
+geodesic ori error: RMS 27.17 deg, max 70.44 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    51.56°   169.39° -105.24°
+  pitch    13.08°    44.40°  -44.40°
+    yaw    48.80°   175.44°   67.63°
+
+worst tilt (grav_z) : +0.722
+orientation walls    : 95.0 deg stance / 95.0 deg flight, cap 180.0 deg; grav_z 0.65; upright fallback on
+|action| mean/max   : 0.342 / 1.000
+action saturation   : 3.3% of joint-ticks
+jitter (mrad/tick)  : 103.9   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -    +20    +60
+    takeoff   2.10s      ?     +0      -      -
+  touchdown   2.36s    n/a    +60      -      -
+    takeoff   2.86s   +100    +80      -      -
+  touchdown   3.36s      -      -      ?      ?
+
+diag swing-foot touches: 5 tick-feet, median force 23 max 38 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.2871    0.1676    0.3141      0.9853     3.411
+  thigh    0.3439    0.3293    0.4358      1.7168     4.887
+   calf    0.3433    0.2599    0.3655      0.9860     3.358
+    all    0.3258    0.2608    0.3751      1.7168     3.949
+worst-tracked joint : RR_thigh_joint (max |q-cmd| 1.7196 rad)

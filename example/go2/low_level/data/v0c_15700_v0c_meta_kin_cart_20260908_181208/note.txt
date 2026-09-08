@@ -1,0 +1,1 @@
+this one had grav_z max relaxed to 0.65 and ori_err relaxed to 95deg, didnt make a diff tho
