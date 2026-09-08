@@ -525,7 +525,7 @@ class Custom(_base.Custom):
             "flight orientation multiplier", flight_ori_mult, lo=1.0
         )
         #self.max_gravity_z = float(meta["max_gravity_z"])
-        self.max_gravity_z = 0.65
+        self.max_gravity_z = 0.8
         self.upright_fallback = bool(upright_fallback)
         self._current_ori_limit_deg = min(self.ori_stance_deg, self.abort_ori_cap_deg)
         self.abort_ori_deg = self._current_ori_limit_deg
