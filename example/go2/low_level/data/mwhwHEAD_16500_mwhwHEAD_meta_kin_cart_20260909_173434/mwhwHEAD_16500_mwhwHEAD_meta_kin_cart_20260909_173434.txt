@@ -1,0 +1,37 @@
+run          : mwhwHEAD_16500_mwhwHEAD_meta_kin_cart
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/mwhwHEAD_16500.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/mwhwHEAD_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/cart.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (orientation error 99.6 deg exceeds 95.0 deg (stance) at t=3.48)   175/475 ticks, 3.48/9.48 s
+geodesic ori error: RMS 26.39 deg, max 99.63 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    29.87°   131.35° -131.35°
+  pitch    18.00°    52.09°  -28.73°
+    yaw    25.89°    69.66°   69.66°
+
+worst tilt (grav_z) : +0.795
+orientation walls    : 95.0 deg stance / 95.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.341 / 1.000
+action saturation   : 4.0% of joint-ticks
+jitter (mrad/tick)  : 111.3   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -    -20    +80
+    takeoff   2.10s      ?    -60      -      -
+  touchdown   2.36s    n/a   -240      -      -
+    takeoff   2.86s   -200    +60      -      -
+  touchdown   3.36s      -      -    -60      ?
+
+diag swing-foot touches: 9 tick-feet, median force 40 max 108 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.2293    0.1856    0.2882      1.0321     3.064
+  thigh    0.3399    0.3617    0.4407      1.7510     4.890
+   calf    0.2685    0.2070    0.3180      0.9950     3.361
+    all    0.2830    0.2634    0.3552      1.7510     3.855
+worst-tracked joint : RR_thigh_joint (max |q-cmd| 1.7763 rad)
