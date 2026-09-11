@@ -1,0 +1,40 @@
+run          : mix50ctrl_19150_mix50ctrl_meta_kin_cart
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/mix50ctrl_19150.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/lat_utils/mix50ctrl_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/hopscotch_utils/cart.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (upright-reference tilt guard at t=4.80 (grav_z=-0.364, ref=-0.986))   241/475 ticks, 4.80/9.48 s
+geodesic ori error: RMS 28.47 deg, max 77.86 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    26.16°   144.17°  -60.78°
+  pitch    22.25°    56.40°  -55.86°
+    yaw    24.60°   117.91°  -17.77°
+
+worst tilt (grav_z) : +0.080
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.347 / 1.000
+action saturation   : 6.9% of joint-ticks
+jitter (mrad/tick)  : 119.6   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -100   +120
+    takeoff   2.10s      ?    -20      -      -
+  touchdown   2.36s    n/a   +180      -      -
+    takeoff   2.86s      ?    +80      -      -
+  touchdown   3.36s      -      -    -20    -80
+    takeoff   3.90s      -      -    -20   -300
+  touchdown   4.16s      -      -    -20   +100
+    takeoff   4.62s      -      -   -240    +20
+
+diag swing-foot touches: 98 tick-feet, median force 38 max 212 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.2042    0.1810    0.2199      0.7072     3.035
+  thigh    0.3400    0.3340    0.4134      1.4001     3.669
+   calf    0.2519    0.2315    0.3191      1.1693     3.124
+    all    0.2713    0.2568    0.3271      1.4001     3.288
+worst-tracked joint : FL_thigh_joint (max |q-cmd| 1.5434 rad)

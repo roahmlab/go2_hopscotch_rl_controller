@@ -1124,7 +1124,7 @@ def _build_parser():
         help="hardware cap on the phase-aware training orientation wall (0,180]",
     )
     parser.add_argument(
-        "--ori-stance-deg", type=float, default=95,
+        "--ori-stance-deg", type=float, default=180,
         help="explicitly override meta term_ori_err; values above training allow "
              "untrained divergence states",
     )
