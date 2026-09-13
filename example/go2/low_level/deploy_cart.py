@@ -884,7 +884,7 @@ class Custom:
                           "(limit %.0f, ref grav_z %.2f) -> damping",
                           t, ori_err, self.abort_ori_deg, grav_ref_z)
             self.aborted = True
-        elif grav_ref_z < REF_UPRIGHT_GRAV_Z and grav_b[2] > -0.4:
+        elif grav_ref_z < REF_UPRIGHT_GRAV_Z and grav_b[2] > -0.1:
             logging.error("TILT ABORT at t %.2f: grav_z %.2f while the reference is "
                           "upright (ref grav_z %.2f) -> damping",
                           t, grav_b[2], grav_ref_z)
