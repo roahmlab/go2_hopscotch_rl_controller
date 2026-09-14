@@ -83,6 +83,34 @@ MOTOR_FROM_ISO = [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
 FOOTFORCE_FROM_ISO_FOOT = [1, 0, 3, 2]           # FL FR RL RR <- (FR FL RR RL)
 FOOT_NAMES = ["FL", "FR", "RL", "RR"]
 
+# ---- auxiliary high-rate channels, logged next to tau_est (additive; saved into
+# *_torque_measured.npz). (key, width) in row order; motor channels in ISO order,
+# foot channels FL FR RL RR.
+AUX_FIELDS = [("power_v", 1), ("power_a", 1), ("board_ntc", 2), ("bms_soc", 1),
+              ("bms_current", 1), ("bms_bq_ntc", 2), ("bms_mcu_ntc", 2),
+              ("motor_temp", 12), ("motor_lost", 12), ("foot_force_raw", 4),
+              ("bms_cell_vol", 15)]
+AUX_WIDTH = sum(w for _, w in AUX_FIELDS)
+
+
+def aux_sample(msg):
+    """One AUX_FIELDS row from a LowState_. Never raises (it runs in the DDS
+    callback): any missing/odd field yields a NaN row of the same width."""
+    try:
+        ms, bms = msg.motor_state, msg.bms_state
+        row = [float(msg.power_v), float(msg.power_a),
+               float(msg.temperature_ntc1), float(msg.temperature_ntc2),
+               float(bms.soc), float(bms.current),
+               float(bms.bq_ntc[0]), float(bms.bq_ntc[1]),
+               float(bms.mcu_ntc[0]), float(bms.mcu_ntc[1])]
+        row += [float(ms[m].temperature) for m in MOTOR_FROM_ISO]
+        row += [float(ms[m].lost) for m in MOTOR_FROM_ISO]
+        row += [float(msg.foot_force[i]) for i in FOOTFORCE_FROM_ISO_FOOT]
+        row += [float(v) for v in bms.cell_vol[:15]]
+        return row if len(row) == AUX_WIDTH else [float("nan")] * AUX_WIDTH
+    except Exception:
+        return [float("nan")] * AUX_WIDTH
+
 
 # --------------------------------------------- fixed control-loop constants
 CTRL_DT = 0.02
@@ -638,6 +666,7 @@ class Custom:
         self.hf_t0 = 0.0
         self.hf_t = []
         self.hf_tau = []
+        self.hf_aux = []                  # AUX_FIELDS rows (battery, temps, BMS, raw pads)
         self.HF_MAX = 400000
 
         self._loop_hz = 0.0
@@ -694,6 +723,7 @@ class Custom:
             ms = msg.motor_state
             self.hf_t.append(time.perf_counter() - self.hf_t0)
             self.hf_tau.append([ms[m].tau_est for m in MOTOR_FROM_ISO])
+            self.hf_aux.append(aux_sample(msg))
 
     # ------------------------------------------------------------ obs pieces
     def _imu_quat(self):
@@ -1034,11 +1064,29 @@ class Custom:
         hf_rate = float("nan")
         if n_hf > 2:
             hf_rate = (n_hf - 1) / (hf_t[-1] - hf_t[0])
+            # auxiliary channels (additive keys; same rows as t/tau_est)
+            aux_rows = list(getattr(self, "hf_aux", []))[:n_hf]
+            aux = np.full((n_hf, AUX_WIDTH), np.nan)
+            if aux_rows:
+                aux[:len(aux_rows)] = np.asarray(aux_rows, float)
+            aux_keys, col = {}, 0
+            for key, width in AUX_FIELDS:
+                aux_keys[key] = aux[:, col] if width == 1 else aux[:, col:col + width]
+                col += width
             np.savez(stem + "_torque_measured.npz",
                      t=hf_t, tau_est=hf_tau, tau_max=TAU_MAX_ISO, rate=hf_rate,
-                     joint_names=np.array(ISO_NAMES), run_tag=self.run_tag)
+                     joint_names=np.array(ISO_NAMES), run_tag=self.run_tag,
+                     foot_names=np.array(FOOT_NAMES), **aux_keys)
             logging.info("measured-torque log: %d samples @ %.1f Hz, |tau_est| max %.1f N.m",
                          n_hf, hf_rate, np.abs(hf_tau).max())
+            v = aux_keys["power_v"]
+            if np.isfinite(v).any():
+                logging.info("battery: %.2f V at start, min %.2f V, %.2f V at end | peak %.1f A | "
+                             "SOC %s%% | max motor temp %s C",
+                             v[np.isfinite(v)][0], np.nanmin(v), v[np.isfinite(v)][-1],
+                             np.nanmax(np.abs(aux_keys["power_a"])),
+                             f"{np.nanmin(aux_keys['bms_soc']):.0f}",
+                             f"{np.nanmax(aux_keys['motor_temp']):.0f}")
         else:
             logging.warning("no high-rate torque samples captured (%d) -- was the "
                             "policy phase reached?", n_hf)

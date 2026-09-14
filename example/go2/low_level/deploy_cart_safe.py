@@ -663,6 +663,7 @@ class Custom(_base.Custom):
             self.hf_tau.append([
                 motor_state[m].tau_est for m in _base.MOTOR_FROM_ISO
             ])
+            self.hf_aux.append(_base.aux_sample(msg))
 
     @staticmethod
     def _normalized_quat(quat):
