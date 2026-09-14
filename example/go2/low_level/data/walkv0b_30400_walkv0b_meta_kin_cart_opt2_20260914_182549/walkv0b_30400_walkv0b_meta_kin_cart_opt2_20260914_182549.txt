@@ -1,0 +1,35 @@
+run          : walkv0b_30400_walkv0b_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/walkv0b_30400.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/walkv0b_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (grav_z 0.849 exceeds global wall 0.800 at t=2.38)   120/437 ticks, 2.38/8.72 s
+geodesic ori error: RMS 17.59 deg, max 71.18 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    46.66°   167.29°  142.25°
+  pitch    12.01°    45.10°  -45.10°
+    yaw    47.67°   169.34° -139.33°
+
+worst tilt (grav_z) : +0.849
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.315 / 1.000
+action saturation   : 2.2% of joint-ticks
+jitter (mrad/tick)  : 100.1   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -    +40    +40
+    takeoff   2.10s    +40   +100      -      -
+  touchdown   2.36s      ?     +0      -      -
+
+diag swing-foot touches: 4 tick-feet, median force 24 max 30 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.1501    0.0994    0.1672      0.4993     1.626
+  thigh    0.1783    0.1656    0.2493      0.9738     2.273
+   calf    0.1858    0.2210    0.2914      1.1212     2.477
+    all    0.1721    0.1695    0.2415      1.1212     2.156
+worst-tracked joint : FR_calf_joint (max |q-cmd| 0.6467 rad)
