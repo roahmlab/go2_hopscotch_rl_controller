@@ -1,0 +1,38 @@
+run          : ft19150_21600_ft19150_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/ft19150_21600.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/ft19150_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : completed   437/437 ticks, 8.72/8.72 s
+geodesic ori error: RMS 18.09 deg, max 66.79 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    30.32°   175.75°    1.33°
+  pitch     7.97°    42.69°   -0.17°
+    yaw    28.47°   179.81°   -0.10°
+
+worst tilt (grav_z) : +0.457
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.195 / 1.000
+action saturation   : 2.2% of joint-ticks
+jitter (mrad/tick)  : 56.6   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -120   +120
+    takeoff   2.10s   +120    +20      -      -
+  touchdown   2.36s    +20   +120      -      -
+    takeoff   2.86s    +60    +80      -      -
+  touchdown   3.34s      -      -    -20      ?
+  touchdown   4.16s    +20    +20      -      -
+
+diag swing-foot touches: 54 tick-feet, median force 32 max 146 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.1431    0.1283    0.1785      0.9665     2.064
+  thigh    0.3760    0.2822    0.3157      1.5946     3.487
+   calf    0.1197    0.1766    0.1958      1.0197     2.334
+    all    0.2423    0.2060    0.2379      1.5946     2.700
+worst-tracked joint : RR_thigh_joint (max |q-cmd| 2.1555 rad)
