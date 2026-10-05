@@ -1,0 +1,18 @@
+mocap        : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/xyz_go2.npz
+run trace    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/data/zref2w_kick6_28300_zref2w_kick6_meta_kin_cart_opt2_20261005_181119/zref2w_kick6_28300_zref2w_kick6_meta_kin_cart_opt2_20261005_181119.npz
+plan         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+sync         : t0 11.993 s into the recording, correlation r 0.665
+frame        : yaw -53.0 deg, zeroed on the first 0.2 s
+
+                    apex z      gain  fwd travel
+            plan   0.7633m   0.5356m    -0.0170m
+           vicon   0.4945m   0.2656m    -0.7701m
+
+   flight window   plan apex  vicon apex     delta
+      2.10-2.36s     0.2980m     0.0139m  -0.2841m
+      2.86-3.34s     0.5356m     0.2655m  -0.2701m
+
+   axis    RMS err   max|err|     final
+      x    0.4293m    0.8686m  -0.7564m
+      y    0.3589m    0.7686m   0.7593m
+      z    0.1697m    0.3614m  -0.1428m
