@@ -1,0 +1,37 @@
+run          : anchordb1_22600_anchordb1_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/anchordb1_22600.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/anchordb1_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (upright-reference tilt guard at t=3.60 (grav_z=-0.077, ref=-0.888))   181/437 ticks, 3.60/8.72 s
+geodesic ori error: RMS 16.31 deg, max 70.58 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    24.11°    81.44°  -81.44°
+  pitch     8.06°    27.67°   27.67°
+    yaw    27.27°    93.99°   93.99°
+
+worst tilt (grav_z) : +0.046
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.354 / 1.000
+action saturation   : 5.0% of joint-ticks
+jitter (mrad/tick)  : 126.0   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -260      ?
+    takeoff   2.10s   -200     +0      -      -
+  touchdown   2.36s    n/a   -180      -      -
+    takeoff   2.86s    +80    +80      -      -
+  touchdown   3.34s      -      -    -60    +60
+
+diag swing-foot touches: 3 tick-feet, median force 56 max 126 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.1527    0.1631    0.2062      0.8721     2.606
+  thigh    0.2765    0.3103    0.3689      1.5734     4.162
+   calf    0.1430    0.2537    0.2664      1.1687     3.238
+    all    0.2002    0.2498    0.2884      1.5734     3.396
+worst-tracked joint : RL_thigh_joint (max |q-cmd| 1.2240 rad)
