@@ -89,7 +89,10 @@ FOOT_NAMES = ["FL", "FR", "RL", "RR"]
 AUX_FIELDS = [("power_v", 1), ("power_a", 1), ("board_ntc", 2), ("bms_soc", 1),
               ("bms_current", 1), ("bms_bq_ntc", 2), ("bms_mcu_ntc", 2),
               ("motor_temp", 12), ("motor_lost", 12), ("foot_force_raw", 4),
-              ("bms_cell_vol", 15)]
+              ("bms_cell_vol", 15),
+              # 2026-10-08: IMU + joint kinematics at the LowState rate, so base xyz can be
+              # reconstructed offline (leg odometry in stance, ballistic/IMU in flight) without mocap.
+              ("imu_quat", 4), ("imu_gyro", 3), ("imu_accel", 3), ("q_hf", 12), ("dq_hf", 12)]
 AUX_WIDTH = sum(w for _, w in AUX_FIELDS)
 
 
@@ -107,6 +110,12 @@ def aux_sample(msg):
         row += [float(ms[m].lost) for m in MOTOR_FROM_ISO]
         row += [float(msg.foot_force[i]) for i in FOOTFORCE_FROM_ISO_FOOT]
         row += [float(v) for v in bms.cell_vol[:15]]
+        imu = msg.imu_state
+        row += [float(v) for v in imu.quaternion[:4]]
+        row += [float(v) for v in imu.gyroscope[:3]]
+        row += [float(v) for v in imu.accelerometer[:3]]
+        row += [float(ms[m].q) for m in MOTOR_FROM_ISO]
+        row += [float(ms[m].dq) for m in MOTOR_FROM_ISO]
         return row if len(row) == AUX_WIDTH else [float("nan")] * AUX_WIDTH
     except Exception:
         return [float("nan")] * AUX_WIDTH
