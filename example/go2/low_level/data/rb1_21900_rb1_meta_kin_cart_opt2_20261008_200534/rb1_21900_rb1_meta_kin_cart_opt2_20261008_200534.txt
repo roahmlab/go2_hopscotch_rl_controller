@@ -1,0 +1,37 @@
+run          : rb1_21900_rb1_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rb1_21900.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rb1_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (upright-reference tilt guard at t=3.68 (grav_z=-0.013, ref=-0.936))   185/437 ticks, 3.68/8.72 s
+geodesic ori error: RMS 26.40 deg, max 117.87 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    29.05°   114.55°  -85.93°
+  pitch    15.00°    39.37°   25.16°
+    yaw    26.90°   108.13°  -45.38°
+
+worst tilt (grav_z) : +0.046
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.366 / 1.000
+action saturation   : 6.0% of joint-ticks
+jitter (mrad/tick)  : 128.2   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -300      ?
+    takeoff   2.10s   -120    +40      -      -
+  touchdown   2.36s   -100   -100      -      -
+    takeoff   2.86s   +160    +80      -      -
+  touchdown   3.34s      -      -      ?    -40
+
+diag swing-foot touches: 8 tick-feet, median force 48 max 146 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.1835    0.2216    0.1965      0.7226     3.345
+  thigh    0.2793    0.3817    0.3734      1.6290     4.552
+   calf    0.1997    0.2555    0.2739      0.9649     3.240
+    all    0.2248    0.2945    0.2904      1.6290     3.760
+worst-tracked joint : FL_thigh_joint (max |q-cmd| 1.5284 rad)
