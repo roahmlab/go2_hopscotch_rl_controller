@@ -51,7 +51,7 @@ class Custom:
         self.Kd = 2.0
 
         # ceiling on the total commanded torque (PD + feedforward), as a fraction of tau_limit
-        self.torque_ceiling = 0.9
+        self.torque_ceiling = 1.0
 
         # stand-up gains (fold/align/hold only; policy phase uses Kp/Kd above)
         self.Kp_stand = 60.0
