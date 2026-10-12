@@ -1,0 +1,8 @@
+  500 Hz path (IMU + joints at the LowState rate); 1 flight(s)
+    flight 2.94-3.26 s: take-off v [0.91 0.19 0.03] m/s | xy displacement: accel-integrated [0.23 0.04], constant-velocity [0.29 0.06] m | apex 0.35 m | vertical integration residual +10 cm
+data/rb1_21900_rb1_meta_kin_cart_opt2_20261008_191627
+  4370 steps, stance 90% of steps, flight segments: 16
+  contraction (2.36-2.86 s) lowest foot height above the floor [cm]: FL +0.0  FR +0.0  RL +12.1  RR -0.3   (sim RR +1.6..+1.9; <= 0 means it touched)
+  base travel start->end: x +1.90 m, y +0.72 m | max |y| excursion 0.72 m | apex z 0.53 m
+  plan travel: x -0.02, y +0.20 | odometry minus plan at the end: x +1.91, y +0.52 m
+  -> data/rb1_21900_rb1_meta_kin_cart_opt2_20261008_191627/odom_base_pos.png
