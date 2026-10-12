@@ -1,0 +1,37 @@
+run          : rab1_21900_rab1_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rab1_21900.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rab1_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (upright-reference tilt guard at t=4.00 (grav_z=-0.004, ref=-0.995))   201/437 ticks, 4.00/8.72 s
+geodesic ori error: RMS 25.01 deg, max 94.28 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    30.14°   100.42°   94.33°
+  pitch    12.04°    39.25°   24.02°
+    yaw    24.29°    95.16°  -10.46°
+
+worst tilt (grav_z) : +0.056
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.335 / 1.000
+action saturation   : 4.4% of joint-ticks
+jitter (mrad/tick)  : 114.7   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -120      ?
+    takeoff   2.10s      ?    -20      -      -
+  touchdown   2.36s    n/a   +160      -      -
+    takeoff   2.86s   +160    +80      -      -
+  touchdown   3.34s      -      -   +120    -60
+
+diag swing-foot touches: 24 tick-feet, median force 36 max 108 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.1930    0.1698    0.2176      0.8265     2.949
+  thigh    0.3837    0.3097    0.4252      1.4349     4.582
+   calf    0.1689    0.2286    0.2522      1.0174     3.118
+    all    0.2665    0.2429    0.3118      1.4349     3.625
+worst-tracked joint : FL_thigh_joint (max |q-cmd| 1.5040 rad)
