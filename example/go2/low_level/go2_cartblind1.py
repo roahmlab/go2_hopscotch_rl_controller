@@ -77,7 +77,7 @@ class Custom:
         self.alignment_percent = 0
 
         # hold at q0 with integral action: converges to the static holding torque
-        self.hold_s = 10.0
+        self.hold_s = 20.0
         self.hold_percent = 0
         self.Ki = 100.0
         self.tau_i_max = 15.0
