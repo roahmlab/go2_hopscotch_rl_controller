@@ -145,9 +145,10 @@ class Custom:
         self.use_quat = obs_tag in ("quat_v5_pos", "quat_v5")
         self.use_mocap = obs_tag in ("euler_v3_pos", "quat_v5_pos")
         # action mode the actor was trained with: residual on u_ref clipped to the motor
-        # limit, or the feedforward torque itself as tanh of the output times the limit
+        # limit, the same residual as a shift of the PD target by v / Kp, or the
+        # feedforward torque itself as tanh of the output times the limit
         self.u_term = str(np.asarray(ck.get("u_term", "uref_pd")))
-        assert self.u_term in ("uref_clip_pd", "tanh_pd"), f"unsupported action mode {self.u_term}"
+        assert self.u_term in ("uref_clip_pd", "shift_pd", "tanh_pd"), f"unsupported action mode {self.u_term}"
         obs_width = (73 + 2 * self.use_quat + 3 * self.use_accelerometer
                      + 3 * self.use_mocap
                      + (30 + self.use_quat) * len(self.preview_offsets))
@@ -280,6 +281,18 @@ class Custom:
         self.buf = (np.tile(obs, (self.k_obs, 1)) if self.buf is None
                     else np.concatenate([self.buf[1:], obs[None]], 0))
         return np.asarray(self.policy_fn(self.jnp.asarray(self.buf)))
+
+    def SaveRunLog(self):
+        """Writes everything logged so far to a timestamped npz next to this script."""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), time.strftime(
+            f"run_log_{os.path.splitext(self.blind)[0]}_%Y%m%d_%H%M%S.npz"))
+        np.savez(path, tick=np.array(list(self.log_tick)), align=np.array(list(self.log_align)),
+                 inf=np.array(list(self.log_inf)), state=np.array(list(self.log_state)),
+                 sat=np.array(list(self.log_sat)),
+                 layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3,foot4,"
+                        "mocap3,mocap_raw3,mocap_age1,mocap_seq1")
+        print(f"saved {path} ({len(self.log_state)} policy ticks)", flush=True)
+        return path
 
     # Public methods
     def Init(self):
@@ -666,15 +679,21 @@ class Custom:
             fade = (0.0 if self.handoff_fade_ticks <= 0 else
                     self.handoff_fade_gain
                     * max(0.0, 1.0 - (self.ii / self.stride) / self.handoff_fade_ticks))
-            ff = (self.tau_limit * np.tanh(v) if self.u_term == "tanh_pd"
-                  else self.u_ref[self.ii] + v)
+            if self.u_term == "tanh_pd":
+                ff = self.tau_limit * np.tanh(v)
+            elif self.u_term == "shift_pd":
+                ff = self.u_ref[self.ii]
+            else:
+                ff = self.u_ref[self.ii] + v
             tau = np.clip(ff + fade * self.tau_i, -self.tau_limit, self.tau_limit)
-            if not np.isfinite(tau).all():
+            q_des = self.x_ref[self.ii][7:19]
+            if self.u_term == "shift_pd":
+                q_des = q_des + v / self.Kp
+            dq_des = self.x_ref[self.ii][25:37]
+            if not (np.isfinite(tau).all() and np.isfinite(q_des).all()):
                 self.fault = True
                 print("FAULT: non-finite command, entering damping mode", flush=True)
                 return
-            q_des = self.x_ref[self.ii][7:19]
-            dq_des = self.x_ref[self.ii][25:37]
 
             # torque-saturation check: full firmware torque = PD + tau vs motor limit
             total = self.Kp * (q_des - dof_pos) + self.Kd * (dq_des - dof_vel) + tau
@@ -764,34 +783,40 @@ if __name__ == '__main__':
     custom = Custom()
     custom.Init()
     custom.Start()
+    saved = False
 
-    while custom.hold_percent < 1:
-        time.sleep(0.1)
-    # LowCmdWrite holds q0 on its own thread while this blocks.
-    input("aligned and holding -- press Enter to run the trajectory...")
-    custom.go = True
+    try:
+        while custom.hold_percent < 1:
+            time.sleep(0.1)
+        # LowCmdWrite holds q0 on its own thread while this blocks.
+        input("aligned and holding -- press Enter to run the trajectory...")
+        custom.go = True
 
-    while True:
-        if custom.settle_percent >= 1:
-           time.sleep(1)
-           np.savez("run_log.npz", tick=np.array(custom.log_tick),
-                    align=np.array(custom.log_align), inf=np.array(custom.log_inf),
-                    state=np.array(custom.log_state), sat=np.array(custom.log_sat),
-                    layout="ii,q12,dq12,quat4,gyro3,v12,tau_meas12,tau_cmd12,accel3,foot4,"
-                           "mocap3,mocap_raw3,mocap_age1,mocap_seq1")
-           for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
-               a = 1e3 * np.array(a)
-               print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
-                     f"p99 {np.percentile(a, 99):.2f} max {a.max():.2f} ms")
-           S = np.array(custom.log_state)
-           if len(S):
-               ti = S[:, 0].astype(int)
-               qerr = S[:, 1:13] - custom.x_ref[ti, 7:19]
-               querr = S[:, 25:29] - custom.x_ref[ti, 3:7]
-               print(f"tracking: joint err rms {np.sqrt((qerr ** 2).mean()):.4f} max {np.abs(qerr).max():.4f} rad, "
-                     f"quat err max {np.abs(querr).max():.4f}")
-           print("Done!")
-           # LowCmdWrite keeps holding qf on its own thread while this blocks.
-           input("holding stance -- press Enter to release...")
-           sys.exit(-1)
-        time.sleep(1)
+        while True:
+            if custom.fault and not saved:
+                custom.SaveRunLog()
+                saved = True
+            if custom.settle_percent >= 1:
+                time.sleep(1)
+                custom.SaveRunLog()
+                saved = True
+                for nm, a in (("tick", custom.log_tick), ("align", custom.log_align), ("inf", custom.log_inf)):
+                    a = 1e3 * np.array(a)
+                    print(f"{nm}: n={len(a)} med {np.median(a):.2f} p90 {np.percentile(a, 90):.2f} "
+                          f"p99 {np.percentile(a, 99):.2f} max {a.max():.2f} ms")
+                S = np.array(custom.log_state)
+                if len(S):
+                    ti = S[:, 0].astype(int)
+                    qerr = S[:, 1:13] - custom.x_ref[ti, 7:19]
+                    querr = S[:, 25:29] - custom.x_ref[ti, 3:7]
+                    print(f"tracking: joint err rms {np.sqrt((qerr ** 2).mean()):.4f} max {np.abs(qerr).max():.4f} rad, "
+                          f"quat err max {np.abs(querr).max():.4f}")
+                print("Done!")
+                # LowCmdWrite keeps holding qf on its own thread while this blocks.
+                input("holding stance -- press Enter to release...")
+                sys.exit(-1)
+            time.sleep(1)
+    finally:
+        # Ctrl+C after a fall would otherwise lose everything logged in memory.
+        if not saved and custom.log_state:
+            custom.SaveRunLog()
