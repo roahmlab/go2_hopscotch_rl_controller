@@ -1,0 +1,38 @@
+run          : rakb1_26300_rakb1_meta_kin_cart_opt2
+checkpoint   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rakb1_26300.pt
+meta         : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/DONT_BREAK/rakb1_meta.json
+reference    : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/second_one/cart_opt2.npz
+contract     : kinematic home-anchor, frame 58, obs 1883, tau_obs 'cmd', lpf 0.7
+outcome      : ABORTED (upright-reference tilt guard at t=4.44 (grav_z=-0.099, ref=-0.990))   223/437 ticks, 4.44/8.72 s
+geodesic ori error: RMS 36.12 deg, max 90.42 deg
+contact-blind: True
+
+   axis   RMS err  max|err|    final
+   roll    36.65°   174.12°  -72.02°
+  pitch    19.75°    55.79°  -53.92°
+    yaw    40.97°   178.00°    5.89°
+
+worst tilt (grav_z) : +0.091
+orientation walls    : 180.0 deg stance / 180.0 deg flight, cap 180.0 deg; grav_z 0.80; upright fallback on
+|action| mean/max   : 0.338 / 1.000
+action saturation   : 4.7% of joint-ticks
+jitter (mrad/tick)  : 132.9   (HW pass line ~25; deploy-stream, same stat as the sim probes)
+
+contact timing vs plan (ms, + = late; n/a = pad never released):
+      event  plan_t     FL     FR     RL     RR
+    takeoff   0.60s      -      -   -240      ?
+    takeoff   2.10s    +80     +0      -      -
+  touchdown   2.36s   -120   -140      -      -
+    takeoff   2.86s    +40    +80      -      -
+  touchdown   3.34s      -      -   -100    -20
+  touchdown   4.16s      ?     +0      -      -
+
+diag swing-foot touches: 39 tick-feet, median force 53 max 186 (raw units x FOOT_FORCE_TO_N=1) — the live sysid readout: ~40-80 N good, 150 N+ drifted
+
+joint tracking (RMS over the run, rad / rad/s):
+          |q-ref|   |q-cmd|   |cmd-ref|  max|cmd-ref|  |qd-ref|
+    hip    0.2058    0.1685    0.2478      1.0162     2.972
+  thigh    0.4174    0.3116    0.4647      1.5464     4.932
+   calf    0.2537    0.2668    0.3219      1.1711     4.119
+    all    0.3060    0.2560    0.3564      1.5464     4.087
+worst-tracked joint : RR_thigh_joint (max |q-cmd| 1.3402 rad)
