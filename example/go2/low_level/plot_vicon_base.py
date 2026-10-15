@@ -30,12 +30,13 @@ BASE_ = BASE
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories.npz"
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories_long_stride.npz"
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories_two_leg2.npz"
-TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+TRAJ = BASE_ / "hopscotch_utils" / "trajectories_cartwheel_2.npz"
 
 
-def schedule():
-    """(landings_ms, flights_s) from TRAJ's contact passthrough; module constants if absent."""
-    f = np.load(TRAJ)
+def schedule(path=None):
+    """(landings_ms, flights_s) from the reference's contact passthrough; module constants if absent."""
+    f = np.load(path or TRAJ)
     if "impact_times" not in f.files or "contact" not in f.files:
         return LANDINGS_MS, FLIGHTS_S
     land = tuple(int(round(1e3 * float(t))) for t in np.asarray(f["impact_times"]).ravel())
@@ -89,11 +90,12 @@ def load_reference(path):
 
 
 def load_mocap(path):
-    """(t from record start, xyz metres, quat wxyz); occlusion NaNs are kept, not filled.
+    """(t from record start, xyz metres, quat as stored); occlusion NaNs are kept, not filled.
 
     The recorder names the array quat_xyzw but stores the SDK value unmodified, and on
-    this rig that is w-FIRST -- so the layout is detected from the data (|w| ~ 1 for a
-    robot anywhere near level) rather than trusted from the key name.
+    this rig that is w-FIRST. The order is not guessed here: a level robot facing 180 deg
+    in the Vicon frame has its largest component in z, which fooled a largest-component
+    guess, so pick_layout() settles it against the reference once the run is synced.
     """
     d = np.load(path, allow_pickle=True)
     xyz = (np.asarray(d["xyz"], float) if "xyz" in d.files
@@ -106,16 +108,6 @@ def load_mocap(path):
         if key in d.files:
             q = np.asarray(d[key], float)
             break
-    if q is not None:
-        w_idx = int(np.argmax(np.nanmedian(np.abs(q), axis=0)))
-        if w_idx == 3:
-            q = q[:, [3, 0, 1, 2]]
-        elif w_idx != 0:
-            print(f"  WARNING: quaternion layout unclear (largest component is {w_idx}); "
-                  f"assuming w first")
-        q = q * np.sign(q[:, :1] + (q[:, :1] == 0))
-        print(f"  quaternion read as w-{'first' if w_idx == 0 else 'last -> reordered'}, "
-              f"median tilt {np.degrees(2 * np.arccos(np.clip(np.nanmedian(np.abs(q[:, 0])), 0, 1))):.1f} deg")
     t = np.asarray(d["t"], float)
     t = t - t[0]
     print(f"mocap: {len(t)} samples, {t[-1]:.2f} s, {1 / np.median(np.diff(t)):.0f} Hz, "
@@ -150,6 +142,54 @@ def find_t0(t_m, z_m, t_r, z_r):
     return float(g[k]), float(r[k])
 
 
+def aligned_attitude(q, s_m, t_r, ref_q, settle):
+    """Mocap quaternions rotated by the settle-window offset onto the reference, and that offset."""
+    q = q * np.sign(q[:, :1] + (q[:, :1] == 0))
+    q_off = quat_mul(mean_quat(ref_q[t_r <= settle]), quat_inv(mean_quat(q[s_m])))
+    return quat_mul(np.broadcast_to(q_off, q.shape), q), q_off
+
+
+def geodesic_deg(q_al, t_al, win, t_r, ref_q):
+    """Attitude error (deg) between aligned mocap and the reference interpolated onto the mocap samples."""
+    qi = np.stack([np.interp(t_al[win], t_r, ref_q[:, i]) for i in range(4)], axis=1)
+    qi = qi / np.linalg.norm(qi, axis=1, keepdims=True)
+    return np.degrees(2 * np.arccos(np.clip(np.abs(np.sum(q_al[win] * qi, axis=1)), 0, 1)))
+
+
+# Identity and 180 deg about the body x, y, z axes: the marker cluster's symmetries, under
+# which Vicon jumps between equally valid solutions from one frame to the next.
+SYMMETRIES = np.eye(4)
+
+
+def unflip(q, start):
+    """Undoes Vicon's marker-symmetry flips by keeping each sample the symmetric reading closest to the previous sample."""
+    out = q.copy()
+    prev, last, flips = None, start, 0
+    for k in np.flatnonzero(np.isfinite(q).all(axis=1)):
+        cands = quat_mul(np.broadcast_to(q[k] / np.linalg.norm(q[k]), (4, 4)), SYMMETRIES)
+        pick = start if prev is None else int(np.argmax(np.abs(cands @ prev)))
+        flips += int(pick != last)
+        out[k], prev, last = cands[pick], cands[pick], pick
+    return out, flips
+
+
+def pick_layout(q_read, s_m, t_al, win, t_r, ref_q, settle):
+    """Chooses the stored quaternion order and the Vicon flip state by which combination tracks the reference over the run."""
+    best = None
+    for name, order in (("w-first", [0, 1, 2, 3]), ("w-last", [3, 0, 1, 2])):
+        for start in range(4):
+            q_fix, n_flip = unflip(q_read[:, order], start)
+            q_al, q_off = aligned_attitude(q_fix, s_m, t_r, ref_q, settle)
+            okq = win & np.isfinite(q_al).all(axis=1)
+            err = float(np.median(geodesic_deg(q_al, t_al, okq, t_r, ref_q)))
+            print(f"       quaternion read {name}, starting symmetry {start}: median attitude error {err:.1f} deg "
+                  f"({n_flip} Vicon orientation flips undone)")
+            if best is None or err < best[0]:
+                best = (err, f"{name}, starting symmetry {start}", q_al, q_off)
+    print(f"       -> using {best[1]}")
+    return best[2], best[3]
+
+
 def fit_yaw(xy_m, xy_r):
     """Best-fit planar rotation taking the mocap horizontal path onto the plan's."""
     a, b = xy_m - xy_m.mean(0), xy_r - xy_r.mean(0)
@@ -166,10 +206,13 @@ def main():
     ap.add_argument("--yaw", type=float, default=None, help="mocap->plan yaw in degrees")
     ap.add_argument("--settle", type=float, default=0.2, help="seconds at t=0 averaged to zero both traces")
     ap.add_argument("--pad", type=float, default=0.3, help="seconds of margin kept either side of the motion")
+    ap.add_argument("--path-yaw", action="store_true",
+                    help="align the Vicon heading by fitting the horizontal path, not the settle orientation")
     args = ap.parse_args()
     mocap = Path(args.mocap)
     prefix = Path(args.prefix) if args.prefix else mocap.with_suffix("")
 
+    _, flights_s = schedule(args.ref)
     t_r, ref, ref_q = load_reference(args.ref)
     dur = t_r[-1]
     t_m, moc_raw, moc_q = load_mocap(mocap)
@@ -189,51 +232,62 @@ def main():
         raise SystemExit("ABORT: fewer than 10 valid mocap samples inside the plan window")
     ref_on_m = np.stack([np.interp(t_al[win], t_r, ref[:, i]) for i in range(3)], axis=1)
 
+    s_m = win & (t_al <= args.settle)
+    if s_m.sum() < 2:
+        s_m = win & (t_al <= t_al[win][0] + args.settle)
+
+    # Orientation: the marker cluster is mounted at an unknown fixed rotation to the
+    # body the plan integrates, so the settle window supplies a constant offset -- the
+    # rotational analogue of the position zeroing below.
+    eul_m = eul_r = q_al = q_off = None
+    if moc_q is not None:
+        q_al, q_off = pick_layout(moc_q, s_m, t_al, win, t_r, ref_q, args.settle)
+        eul_m, eul_r = np.degrees(quat2eul(q_al)), np.degrees(quat2eul(ref_q))
+
     travel = float(np.linalg.norm(moc_raw[win][-1, :2] - moc_raw[win][0, :2]))
     if args.yaw is not None:
         yaw = np.radians(args.yaw)
         print(f"frame: yaw = {np.degrees(yaw):+.1f} deg (manual)")
+    elif q_off is not None and not args.path_yaw:
+        # The heading at the settle pose; a path fit is dragged by any drift or fall.
+        yaw = float(quat2eul(q_off[None])[0, 2])
+        print(f"frame: yaw = {np.degrees(yaw):+.1f} deg from the settle orientation "
+              f"(marker cluster assumed body-aligned; --path-yaw fits the path instead)")
     elif travel < 0.05:
         yaw = 0.0
         print(f"frame: only {travel:.3f} m of horizontal travel -- yaw fit would be noise, using 0")
     else:
         yaw = fit_yaw(moc_raw[win][:, :2], ref_on_m[:, :2])
         print(f"frame: yaw = {np.degrees(yaw):+.1f} deg (best fit over {travel:.3f} m)")
+        if q_off is not None:
+            print(f"       orientation offset from settle: yaw {np.degrees(quat2eul(q_off[None])[0, 2]):+.1f} deg "
+                  f"(a large gap from the path fit means the marker cluster is mounted rotated)")
     c, s = np.cos(yaw), np.sin(yaw)
     moc = moc_raw.copy()
     moc[:, 0] = c * moc_raw[:, 0] - s * moc_raw[:, 1]
     moc[:, 1] = s * moc_raw[:, 0] + c * moc_raw[:, 1]
-
-    s_m = win & (t_al <= args.settle)
-    if s_m.sum() < 2:
-        s_m = win & (t_al <= t_al[win][0] + args.settle)
     moc = moc - moc[s_m].mean(0) + ref[t_r <= args.settle].mean(0)
 
-    # Orientation: the marker cluster is mounted at an unknown fixed rotation to the
-    # body the plan integrates, so the settle window supplies a constant offset -- the
-    # rotational analogue of the position zeroing above.
-    eul_m = eul_r = None
-    if moc_q is not None:
-        q_off = quat_mul(mean_quat(ref_q[t_r <= args.settle]), quat_inv(mean_quat(moc_q[s_m])))
-        q_al = quat_mul(np.broadcast_to(q_off, moc_q.shape), moc_q)
-        eul_m, eul_r = np.degrees(quat2eul(q_al)), np.degrees(quat2eul(ref_q))
-        yaw_q = np.degrees(quat2eul(q_off[None])[0, 2])
-        print(f"       orientation offset from settle: yaw {yaw_q:+.1f} deg "
-              f"(position fit said {np.degrees(yaw):+.1f}; a large gap means the marker "
-              f"cluster is mounted rotated)")
-
     crop = (t_al >= -args.pad) & (t_al <= dur + args.pad)
-    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(11, 9))
+    rows = 4 if q_al is not None else 3
+    fig, axes = plt.subplots(rows, 1, sharex=True, figsize=(11, 3 * rows))
     for i, lbl in enumerate("xyz"):
-        for a, b in FLIGHTS_S:
-            axes[i].axvspan(a, b, color="0.9", lw=0, zorder=0)
         axes[i].plot(t_r, ref[:, i], "--", c="0.35", lw=1.5, label="reference")
         axes[i].plot(t_al[crop], moc[crop, i], c="C1", lw=1.6, label="vicon")
         axes[i].set_ylabel(f"{lbl} [m]")
-        axes[i].grid(alpha=0.3)
-        axes[i].set_xlim(-args.pad, dur + args.pad)
+    if q_al is not None:
+        okc = crop & np.isfinite(q_al).all(axis=1) & (t_al >= 0.0) & (t_al <= dur)
+        att = np.full(len(t_al), np.nan)
+        att[okc] = geodesic_deg(q_al, t_al, okc, t_r, ref_q)
+        axes[3].plot(t_al[crop], att[crop], c="C3", lw=1.4)
+        axes[3].set_ylabel("attitude error [deg]")
+    for ax in axes:
+        for a, b in flights_s:
+            ax.axvspan(a, b, color="0.9", lw=0, zorder=0)
+        ax.grid(alpha=0.3)
+        ax.set_xlim(-args.pad, dur + args.pad)
     axes[0].legend(fontsize=9, loc="upper left")
-    axes[2].set_xlabel("t [s]   (shaded = planned flight)")
+    axes[-1].set_xlabel("t [s]   (shaded = planned flight)")
     fig.suptitle(f"Base position: reference vs Vicon -- {mocap.name}"
                  + (f"   (sync r={r:.2f}, yaw {np.degrees(yaw):+.0f} deg)" if np.isfinite(r) else ""))
     fig.tight_layout()
@@ -250,7 +304,7 @@ def main():
            f"{'vicon':>16}{mz.max():9.4f}m{mz.max() - mz[0]:9.4f}m"
            f"{moc[win][-1, 0] - moc[win][0, 0]:11.4f}m", "",
            f"{'flight':>16}{'ref apex':>12}{'vicon apex':>12}{'delta':>10}"]
-    for a, b in FLIGHTS_S:
+    for a, b in flights_s:
         rm, mm = (t_r >= a) & (t_r <= b), win & (t_al >= a) & (t_al <= b)
         if not mm.any():
             continue
@@ -267,11 +321,15 @@ def main():
         for i, lbl in enumerate(("roll", "pitch", "yaw")):
             out.append(f"{lbl:>7}{np.sqrt((ee[:, i] ** 2).mean()):10.3f}°"
                        f"{np.abs(ee[:, i]).max():10.3f}°{ee[-1, i]:9.3f}°")
-        qi = np.stack([np.interp(t_al[win], t_r, ref_q[:, i]) for i in range(4)], axis=1)
-        qi = qi / np.linalg.norm(qi, axis=1, keepdims=True)
-        ang = np.degrees(2 * np.arccos(np.clip(np.abs(np.sum(q_al[win] * qi, axis=1)), 0, 1)))
+        okq = win & np.isfinite(q_al).all(axis=1)
+        ang = geodesic_deg(q_al, t_al, okq, t_r, ref_q)
         out.append(f"{'total':>7}{np.sqrt((ang ** 2).mean()):10.3f}°{ang.max():10.3f}°"
                    f"{ang[-1]:9.3f}°   (geodesic attitude error)")
+        t_q = t_al[okq]
+        out += ["", f"{'touchdown':>16}{'attitude error':>16}"]
+        for a, b in flights_s:
+            if (t_q >= b).any():
+                out.append(f"{f'{b:.2f}s':>16}{ang[np.argmax(t_q >= b)]:15.1f}°")
     report = "\n".join(out)
     print("\n" + report)
     with open(f"{prefix}_base_overlay.txt", "w", encoding="utf-8") as fh:

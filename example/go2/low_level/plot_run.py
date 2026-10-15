@@ -1,4 +1,8 @@
-"""Plot a hardware run against the reference: joint position, joint velocity, base pose, torque, accelerometer, contact."""
+"""Plot a hardware run against the reference: joint position, joint velocity, base pose, torque, accelerometer, contact.
+
+Usage: python3 plot_run.py [run_log.npz] [output_prefix] [reference.npz]; with no log given,
+the newest run_log*.npz next to this script is used (the cartblind controllers timestamp theirs).
+"""
 import json
 import sys
 from pathlib import Path
@@ -6,7 +10,11 @@ from pathlib import Path
 import numpy as np
 
 BASE = Path(__file__).resolve().parent
-LOG = Path(sys.argv[1]) if len(sys.argv) > 1 else BASE / "run_log.npz"
+if len(sys.argv) > 1:
+    LOG = Path(sys.argv[1])
+else:
+    _logs = sorted(BASE.glob("run_log*.npz"), key=lambda p: p.stat().st_mtime)
+    LOG = _logs[-1] if _logs else BASE / "run_log.npz"
 PREFIX = Path(sys.argv[2]) if len(sys.argv) > 2 else LOG.with_suffix("")
 JOINTS = [f"{leg} {j}" for leg in ("FL", "FR", "RL", "RR") for j in ("hip", "thigh", "calf")]
 TAU_LIMIT = np.array([23.7, 23.7, 45.43] * 4)
@@ -18,7 +26,10 @@ BASE_ = BASE
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories.npz"
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories_long_stride.npz"
 # TRAJ = BASE_ / "hopscotch_utils" / "trajectories_two_leg2.npz"
-TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+# TRAJ = BASE_ / "hopscotch_utils" / "trajectories_new_hopscotch.npz"
+TRAJ = BASE_ / "hopscotch_utils" / "trajectories_cartwheel_2.npz"
+if len(sys.argv) > 3:
+    TRAJ = Path(sys.argv[3])
 
 
 def schedule():
@@ -106,12 +117,20 @@ if has_foot:
         plan_F = contact_plan_npz(TRAJ)[ti]
     else:
         plan_F = None
-    plan_c = plan_F[:, :, 2] > 1.0 if plan_F is not None else None
+    # References without planned forces still carry the contact schedule.
+    if plan_F is not None:
+        plan_c = plan_F[:, :, 2] > 1.0
+    elif "contact" in src.files:
+        plan_c = np.asarray(src["contact"])[ti] > 0
+    else:
+        plan_c = None
     # foot_force is uncalibrated: threshold at a fraction of this run's own range.
     foot_c = foot > (0.15 * np.nanmax(foot) if np.nanmax(foot) > 0 else np.inf)
 
 qe, de = q - qr, qd - dqr
 ee = (eul - eul_r + 180.0) % 360.0 - 180.0
+# Euler angles break down near +-90 deg pitch (handstand, flip); the geodesic angle does not.
+att_err = np.degrees(2 * np.arccos(np.clip(np.abs(np.sum(quat * quat_r, axis=1)), 0, 1)))
 ratio = np.abs(tau_meas) / TAU_LIMIT if extended else None
 rate = 1000.0 / np.median(np.diff(ti)) if len(ti) > 1 else float("nan")
 
@@ -135,6 +154,12 @@ out += ["", f"{'axis':>10}{'rms':>11}{'max|err|':>11}{'final':>10}"]
 for i, lbl in enumerate(("roll", "pitch", "yaw")):
     out.append(f"{lbl:>10}{np.sqrt((ee[:, i] ** 2).mean()):10.3f}°"
                f"{np.abs(ee[:, i]).max():10.3f}°{ee[-1, i]:9.3f}°")
+out.append(f"{'attitude':>10}{np.sqrt((att_err ** 2).mean()):10.3f}°{att_err.max():10.3f}°{att_err[-1]:9.3f}°"
+           f"   (geodesic)")
+for ms in LANDINGS_MS:
+    k = int(np.argmin(np.abs(ti - ms)))
+    if abs(ti[k] - ms) <= 20:
+        out.append(f"{f'land {ms / 1e3:.2f}s':>10}{att_err[k]:10.3f}°   attitude error at the planned touchdown")
 we = gyro - gyro_r
 for i, lbl in enumerate(("wx", "wy", "wz")):
     out.append(f"{lbl:>10}{np.sqrt((we[:, i] ** 2).mean()):9.3f}r/s"
@@ -153,12 +178,13 @@ if has_foot and plan_c is not None:
     tail += ("\n          contact schedule agreement  "
              + "  ".join(f"{f} {100 * a:.0f}%" for f, a in zip(FEET, agree))
              + f"   (all {100 * (foot_c == plan_c).mean():.0f}%)")
-    # Scale check: if foot_force really is Newtons these ratios sit near 1.
-    fz = plan_F[:, :, 2]
-    tail += ("\n          stance Fz measured/planned  "
-             + "  ".join(f"{f} {foot[plan_c[:, i], i].mean() / max(fz[plan_c[:, i], i].mean(), 1e-6):.2f}"
-                         for i, f in enumerate(FEET))
-             + f"   rms err {np.sqrt(((foot - fz)[plan_c] ** 2).mean()):.1f} N")
+    if plan_F is not None:
+        # Scale check: if foot_force really is Newtons these ratios sit near 1.
+        fz = plan_F[:, :, 2]
+        tail += ("\n          stance Fz measured/planned  "
+                 + "  ".join(f"{f} {foot[plan_c[:, i], i].mean() / max(fz[plan_c[:, i], i].mean(), 1e-6):.2f}"
+                             for i, f in enumerate(FEET))
+                 + f"   rms err {np.sqrt(((foot - fz)[plan_c] ** 2).mean()):.1f} N")
 if has_mocap:
     pe = mocap - pos_r
     tail += ("\n          mocap pos err rms "
@@ -207,7 +233,7 @@ axes.flat[0].legend(fontsize=8)
 fig.tight_layout()
 fig.savefig(f"{PREFIX}_joint_vel.png", dpi=150)
 
-fig, axes = grid(3, 2, "go2 base pose vs reference (solid = measured, dashed = ref)", (14, 10))
+fig, axes = grid(4, 2, "go2 base pose vs reference (solid = measured, dashed = ref)", (14, 13))
 for i, lbl in enumerate(("roll", "pitch", "yaw")):
     axes[i, 0].plot(tt, eul_r[:, i], "--", c="0.35", lw=1.3, label="ref")
     axes[i, 0].plot(tt, eul[:, i], c="C1", lw=1.3, label="measured")
@@ -216,6 +242,10 @@ for i, lbl in enumerate(("wx", "wy", "wz")):
     axes[i, 1].plot(tt, gyro_r[:, i], "--", c="0.35", lw=1.3)
     axes[i, 1].plot(tt, gyro[:, i], c="C1", lw=1.3)
     axes[i, 1].set_ylabel(f"{lbl} [rad/s]")
+axes[3, 0].plot(tt, att_err, c="C3", lw=1.3)
+axes[3, 0].set_ylabel("attitude error [deg]")
+axes[3, 1].plot(tt, np.linalg.norm(gyro - gyro_r, axis=1), c="C3", lw=1.3)
+axes[3, 1].set_ylabel("|angular velocity error| [rad/s]")
 axes[0, 0].set_title("orientation")
 axes[0, 1].set_title("angular velocity")
 axes[0, 0].legend(fontsize=8)
@@ -267,6 +297,7 @@ if has_foot:
         if plan_c is not None:
             ax.fill_between(tt, 0, 1, where=plan_c[:, i], transform=ax.get_xaxis_transform(),
                             color="C0", alpha=0.12, lw=0, zorder=0, label="planned stance")
+        if plan_F is not None:
             ax.plot(tt, plan_F[:, i, 2], "--", c="0.35", lw=1.3, label="planned Fz [N]")
         ax.plot(tt, foot[:, i], c="C1", lw=1.2, label="measured Fz [N]")
         ax.set_ylabel(f"{f}  Fz [N]")
