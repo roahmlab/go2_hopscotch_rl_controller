@@ -1,0 +1,33 @@
+log   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/run_log_actor_cartblind2_20261015_161543.npz
+rows  : 474  0.00-4.73 s @ 100 Hz
+
+     joint    q rms    q max   dq rms   dq max    |v|max  |tau|max  tau/lim   sat
+    FL hip  0.3765   0.8613    1.944    9.710   62.0769    26.767     1.13     6
+  FL thigh  0.2753   0.7470    3.329   17.587   63.1914    27.088     1.14    27
+   FL calf  0.1943   0.5139    4.895   21.548   52.3011    51.208     1.13     5
+    FR hip  0.1815   0.5341    2.816   15.984   59.5787    26.841     1.13     6
+  FR thigh  0.2135   0.6918    3.447   19.089   53.8429    27.187     1.15    19
+   FR calf  0.1569   0.4255    2.884   11.593   52.0716    50.592     1.11     6
+    RL hip  0.3935   0.8298    2.492   11.408   64.4907    26.519     1.12     7
+  RL thigh  0.2696   0.7166    2.996   11.206   42.0107    21.250     0.90     0
+   RL calf  0.2643   1.3408    3.102   16.357   87.5995    44.049     0.97     0
+    RR hip  0.2429   0.7918    3.033   13.642   50.4582    26.717     1.13     1
+  RR thigh  0.4619   1.9169    5.251   37.484   71.9774    28.226     1.19    10
+   RR calf  0.2393   1.0301    4.028   21.451   71.4848    43.290     0.95     0
+
+      axis        rms   max|err|     final
+      roll    26.310°    61.652°   36.082°
+     pitch    13.474°    53.912°  -12.777°
+       yaw    16.372°    49.189°  -20.129°
+  attitude    29.397°    68.505°   44.855°   (geodesic)
+land 2.36s     4.105°   attitude error at the planned touchdown
+land 3.34s    53.361°   attitude error at the planned touchdown
+land 4.14s    50.710°   attitude error at the planned touchdown
+        wx    1.464r/s   12.462r/s  -0.703r/s
+        wy    1.202r/s   10.525r/s   0.373r/s
+        wz    0.833r/s    4.987r/s   0.436r/s
+
+overall   q rms 0.2866 rad   dq rms 3.473 rad/s   |v| mean 13.243 max 87.600 Nm
+          peak tau/limit 1.19   ticks with any joint saturated 75/474   cmd-meas rms 9.41 Nm
+          accel |.| mean 11.12 max 57.41 m/s^2
+          contact schedule agreement  FL 61%  FR 72%  RL 66%  RR 58%   (all 64%)
