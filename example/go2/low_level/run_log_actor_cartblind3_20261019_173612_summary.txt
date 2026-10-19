@@ -1,0 +1,33 @@
+log   : /home/roahm/go2_hopscotch_rl_controller/example/go2/low_level/run_log_actor_cartblind3_20261019_173612.npz
+rows  : 441  0.00-4.40 s @ 100 Hz
+
+     joint    q rms    q max   dq rms   dq max    |v|max  |tau|max  tau/lim   sat
+    FL hip  0.3966   1.0633    3.383   21.172   52.3641    21.745     0.92     0
+  FL thigh  0.4775   1.2795    3.440   17.005   36.3032    26.866     1.13    27
+   FL calf  0.5094   1.8592    4.262   16.674   45.1495    50.023     1.10     2
+    FR hip  0.3660   0.8104    3.606   22.608   34.1173    27.336     1.15     4
+  FR thigh  0.3903   1.2361    3.902   15.292   45.3816    27.707     1.17    13
+   FR calf  0.5063   1.6143    3.380   12.473   42.6149    49.075     1.08     5
+    RL hip  0.3472   1.0435    2.744   13.905   32.5942    25.159     1.06     1
+  RL thigh  0.8275   2.7411    4.213   25.643   44.0323    25.678     1.08     3
+   RL calf  0.2836   0.8198    3.129   13.687   49.8036    38.359     0.84     0
+    RR hip  0.4401   1.0014    3.988   21.652   38.1340    23.823     1.01     1
+  RR thigh  0.6349   2.7306    7.206   32.218   37.4438    26.569     1.12     4
+   RR calf  0.3503   1.0504    4.174   20.722   29.0807    47.889     1.05     1
+
+      axis        rms   max|err|     final
+      roll    60.171°   153.293°    7.493°
+     pitch    27.195°   100.344°    6.129°
+       yaw    56.385°   152.963°    1.511°
+  attitude    42.577°   103.414°    9.753°   (geodesic)
+land 2.36s    18.405°   attitude error at the planned touchdown
+land 3.34s   100.916°   attitude error at the planned touchdown
+land 4.14s    12.436°   attitude error at the planned touchdown
+        wx    3.055r/s   14.093r/s   0.194r/s
+        wy    1.531r/s   10.467r/s   0.379r/s
+        wz    1.284r/s    4.134r/s   0.123r/s
+
+overall   q rms 0.4824 rad   dq rms 4.097 rad/s   |v| mean 7.025 max 52.364 Nm
+          peak tau/limit 1.17   ticks with any joint saturated 43/441   cmd-meas rms 8.00 Nm
+          accel |.| mean 10.29 max 43.61 m/s^2
+          contact schedule agreement  FL 70%  FR 66%  RL 70%  RR 63%   (all 67%)
